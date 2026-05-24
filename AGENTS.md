@@ -2,12 +2,11 @@
 
 ## Project Structure & Module Organization
 
-This is a no-build Azure Static Web Apps MVP. The browser app lives at the repository root: `index.html`, `styles.css`, and `app.js`. Runtime assets are loaded from `assets/`; public syncs keep that directory as a placeholder and do not commit local VRM, VRMA, or audio files. Azure Functions live in `api/`; each endpoint has its own folder with `index.js` and `function.json` (`health`, `realtime-token`, `chat-turn`, `advisor`). Shared API helpers are in `api/_shared/azureOpenAI.js`. Keep configuration samples in `api/local.settings.sample.json`; do not commit real local secrets.
+This is a no-build Azure Static Web Apps MVP. The browser app lives at the repository root: `index.html`, `styles.css`, and `app.js`. Runtime assets are loaded from `assets/`; public syncs keep that directory as a placeholder and do not commit local VRM, VRMA, or audio files. Azure Functions live in `api/`; each endpoint has its own folder with `index.js` and `function.json` (`health`, `realtime-token`, `chat-turn`, `advisor`). Shared API helpers are in `api/_shared/azureOpenAI.js`. Keep configuration samples in `api/local.settings.sample.json`; do not commit real local secrets. Do not use the local Static Web Apps emulator for this project.
 
 ## Build, Test, and Development Commands
 
-- `npm install` installs the Static Web Apps CLI dependency.
-- `npm run serve` starts the static app with the local Functions API via `npx @azure/static-web-apps-cli start . --api-location api`.
+- `npm install` installs the local smoke-test dependency.
 - `cd api && npm start` starts only Azure Functions with `func start`; use this when debugging API endpoints separately.
 - `cp api/local.settings.sample.json api/local.settings.json` creates local settings before adding Azure OpenAI values.
 
@@ -19,7 +18,7 @@ Use JavaScript with 2-space indentation and semicolons, matching existing files.
 
 ## Testing Guidelines
 
-No automated test framework is currently configured. For changes, run `npm run serve`, open the local URL, then use the UI controls in this order: `API確認`, text fallback, and `接続開始` if microphone and Azure Realtime settings are available. For API-only work, call endpoints through the SWA local server so routing matches deployment. If tests are added later, place them near the code or under `tests/`, and add a root `npm test` script.
+No automated test framework is currently configured. For API-only work, use `cd api && npm start` and call the Functions endpoints directly. For frontend-only checks, open `index.html` locally when the browser security model allows it, or validate against a deployed Static Web Apps environment. If tests are added later, place them near the code or under `tests/`, and add a root `npm test` script.
 
 ## Commit & Pull Request Guidelines
 

@@ -4,11 +4,9 @@
   "private": true,
   "description": "Static frontend for ZatsuCoach MVP",
   "scripts": {
-    "serve": "npx @azure/static-web-apps-cli start . --api-location api",
     "smoke:conversation": "node scripts/realtime-conversation-smoke.js"
   },
   "devDependencies": {
-    "@azure/static-web-apps-cli": "^2.0.9",
     "playwright-core": "^1.60.0"
   }
 }
