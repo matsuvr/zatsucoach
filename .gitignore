@@ -1,0 +1,17 @@
+node_modules/
+api/local.settings.json
+*:Zone.Identifier
+.env
+.env.*
+
+.azure/
+.swa/
+.static-web-apps/
+
+assets/*
+!assets/.gitkeep
+*.mp3
+*.wav
+*.webm
+*.ogg
+*.mp4

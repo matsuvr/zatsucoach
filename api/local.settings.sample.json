@@ -1,0 +1,14 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "FUNCTIONS_WORKER_RUNTIME": "node",
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "AZURE_OPENAI_ENDPOINT": "https://YOUR-RESOURCE-NAME.openai.azure.com",
+    "AZURE_OPENAI_API_KEY": "YOUR_AZURE_OPENAI_API_KEY",
+    "REALTIME_DEPLOYMENT": "gpt-realtime-2",
+    "ADVISOR_DEPLOYMENT": "gpt-5.4-nano",
+    "AVATAR_TEXT_DEPLOYMENT": "gpt-5.4-nano",
+    "TRANSCRIPTION_DEPLOYMENT": "gpt-4o-mini-transcribe",
+    "ENABLE_TRANSCRIBE_DIAGNOSTIC": "false"
+  }
+}

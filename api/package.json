@@ -1,0 +1,12 @@
+{
+  "name": "zatsucoach-api",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Azure Functions API for ZatsuCoach MVP",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "func start"
+  }
+}

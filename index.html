@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ZatsuCoach MVP</title>
+  <link rel="stylesheet" href="./styles.css" />
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/",
+        "@pixiv/three-vrm": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm@3/lib/three-vrm.module.min.js"
+      }
+    }
+  </script>
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <div class="product">ZatsuCoach MVP</div>
+      <div class="subtitle">VRM avatar + Azure OpenAI Realtime + parallel advice</div>
+    </div>
+    <div class="toolbar">
+      <button id="btnHealth" class="secondary">API確認</button>
+      <button id="btnSettings" class="secondary">設定</button>
+      <button id="btnConnect" class="primary">接続開始</button>
+      <button id="btnDisconnect" class="danger" disabled>切断</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="stagePanel">
+      <div id="vrmStage" class="stage"></div>
+      <div class="statusbar">
+        <span id="connectionStatus" class="statusChip">idle</span>
+        <span id="avatarStatus">avatar: loading</span>
+        <span id="latencyStatus">first reaction: -</span>
+      </div>
+      <div class="inputRow">
+        <input id="textInput" type="text" placeholder="テキストでも試せます。例: 最近オフィスに戻って疲れますね。" />
+        <button id="btnSendText">送信</button>
+      </div>
+    </section>
+
+    <section class="coachPanel">
+      <div class="tabs">
+        <button class="tab active" data-tab="advice">助言</button>
+        <button class="tab" data-tab="transcript">文字起こし</button>
+        <button class="tab" data-tab="metrics">計測</button>
+        <button class="tab" data-tab="events">イベント</button>
+      </div>
+
+      <div id="adviceTab" class="tabBody active">
+        <div class="panelHeader">
+          <h2>リアルタイム助言</h2>
+          <button id="btnClearAdvice" class="secondary small">クリア</button>
+        </div>
+        <div id="adviceFeed" class="feed"></div>
+      </div>
+
+      <div id="transcriptTab" class="tabBody">
+        <div class="panelHeader">
+          <h2>会話ログ</h2>
+          <button id="btnClearTranscript" class="secondary small">クリア</button>
+        </div>
+        <div id="transcriptFeed" class="feed"></div>
+      </div>
+
+      <div id="metricsTab" class="tabBody">
+        <div class="panelHeader">
+          <h2>速度計測</h2>
+          <button id="btnBenchAdvisor" class="secondary small">助言LLMベンチ</button>
+        </div>
+        <p class="hint">Realtime は各モデルに切り替えて、発話停止から <code>output_audio_buffer.started</code> までを比較します。助言LLMはここから複数モデルを短文で計測できます。</p>
+        <div id="metricsFeed" class="feed compact"></div>
+      </div>
+
+      <div id="eventsTab" class="tabBody">
+        <div class="panelHeader">
+          <h2>Realtime events</h2>
+          <button id="btnClearEvents" class="secondary small">クリア</button>
+        </div>
+        <div id="eventFeed" class="feed compact mono"></div>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="settingsDialog" class="settingsDialog">
+    <form method="dialog" id="settingsForm">
+      <div class="dialogHeader">
+        <h2>実行設定</h2>
+        <button value="cancel" class="secondary">閉じる</button>
+      </div>
+
+      <div class="settingsGrid">
+        <label>
+          Realtime deployment
+          <input name="realtimeDeployment" autocomplete="off" />
+        </label>
+        <label>
+          Advisor deployment
+          <input name="advisorDeployment" autocomplete="off" />
+        </label>
+        <label>
+          Text fallback deployment
+          <input name="avatarTextDeployment" autocomplete="off" />
+        </label>
+        <label>
+          Voice
+          <select name="voice">
+            <option value="marin">marin</option>
+            <option value="cedar">cedar</option>
+            <option value="alloy">alloy</option>
+            <option value="ash">ash</option>
+            <option value="ballad">ballad</option>
+            <option value="coral">coral</option>
+            <option value="echo">echo</option>
+            <option value="sage">sage</option>
+            <option value="shimmer">shimmer</option>
+            <option value="verse">verse</option>
+          </select>
+        </label>
+        <label>
+          Voice speed
+          <input name="voiceSpeed" type="number" min="0.25" max="1.5" step="0.05" />
+        </label>
+        <label>
+          VAD silence ms
+          <input name="vadSilenceMs" type="number" min="120" max="1200" step="10" />
+        </label>
+        <label>
+          VAD threshold
+          <input name="vadThreshold" type="number" min="0.05" max="0.95" step="0.05" />
+        </label>
+        <label>
+          Max response tokens
+          <input name="maxResponseTokens" type="number" min="16" max="512" step="8" />
+        </label>
+        <label>
+          Advisor max tokens
+          <input name="advisorMaxTokens" type="number" min="32" max="4096" step="64" />
+        </label>
+        <label>
+          Advisor reasoning effort
+          <select name="reasoningEffort">
+            <option value="">omit</option>
+            <option value="none">none</option>
+            <option value="minimal">minimal</option>
+            <option value="low">low</option>
+            <option value="medium">medium</option>
+          </select>
+        </label>
+        <label>
+          WebRTC filter
+          <select name="webrtcFilter">
+            <option value="on">on</option>
+            <option value="off">off</option>
+          </select>
+        </label>
+      </div>
+
+      <label class="wideLabel">
+        Realtime system prompt
+        <textarea name="realtimeInstructions" rows="8"></textarea>
+      </label>
+      <label class="wideLabel">
+        Advisor system prompt
+        <textarea name="advisorInstructions" rows="8"></textarea>
+      </label>
+      <label class="wideLabel">
+        Benchmark advisor deployments, comma separated
+        <input name="benchmarkAdvisorDeployments" autocomplete="off" />
+      </label>
+
+      <div class="dialogActions">
+        <button id="btnResetSettings" type="button" class="secondary">既定値に戻す</button>
+        <button id="btnSaveSettings" value="default" class="primary">保存</button>
+      </div>
+    </form>
+  </dialog>
+
+  <audio id="remoteAudio" autoplay></audio>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
