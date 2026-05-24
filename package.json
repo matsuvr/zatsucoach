@@ -4,6 +4,7 @@
   "private": true,
   "description": "Static frontend for ZatsuCoach MVP",
   "scripts": {
+    "build": "node scripts/build-static.js",
     "smoke:conversation": "node scripts/realtime-conversation-smoke.js"
   },
   "devDependencies": {

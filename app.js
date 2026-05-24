@@ -34,6 +34,7 @@ const USER_TURN_TRANSCRIPT_WAIT_MS = 800;
 const DIAGNOSTIC_LOG_LIMIT = 1000;
 const STAGE_TRANSCRIPT_LIMIT = 4;
 const STAGE_ADVICE_TEXT_LIMIT = 96;
+const LOG_FLUSH_DELAY_MS = 900;
 const AVATAR_VRM_URL = './assets/8590256991748008892.vrm';
 const AVATAR_VRMA_URL = './assets/relaxed_stand_idle_1s_skeleton_only_human_breath.vrma';
 
@@ -45,6 +46,7 @@ const serverSettingKeys = Object.freeze([
 
 const els = {
   stage: document.getElementById('vrmStage'),
+  accountStatus: document.getElementById('accountStatus'),
   connectionStatus: document.getElementById('connectionStatus'),
   avatarStatus: document.getElementById('avatarStatus'),
   latencyStatus: document.getElementById('latencyStatus'),
@@ -62,13 +64,19 @@ const els = {
   btnDisconnect: document.getElementById('btnDisconnect'),
   btnSendText: document.getElementById('btnSendText'),
   btnHealth: document.getElementById('btnHealth'),
+  btnLogin: document.getElementById('btnLogin'),
+  btnLogout: document.getElementById('btnLogout'),
   btnBenchAdvisor: document.getElementById('btnBenchAdvisor'),
+  btnRefreshLogs: document.getElementById('btnRefreshLogs'),
+  btnDeleteLog: document.getElementById('btnDeleteLog'),
   btnClearAdvice: document.getElementById('btnClearAdvice'),
   btnClearTranscript: document.getElementById('btnClearTranscript'),
   btnClearEvents: document.getElementById('btnClearEvents'),
   btnExportEvents: document.getElementById('btnExportEvents'),
   btnResetSettings: document.getElementById('btnResetSettings'),
-  textInput: document.getElementById('textInput')
+  textInput: document.getElementById('textInput'),
+  savedSessionsFeed: document.getElementById('savedSessionsFeed'),
+  savedLogFeed: document.getElementById('savedLogFeed')
 };
 
 const state = {
@@ -87,6 +95,18 @@ const state = {
     advisorRequests: 0,
     chatFallbackRequests: 0
   },
+  authUser: null,
+  authChecked: false,
+  logSessionId: '',
+  logSessionStartedAt: '',
+  logSequence: 0,
+  logFlushTimer: null,
+  logFlushInFlight: false,
+  pendingLogItems: [],
+  persistedLogItemCount: 0,
+  persistedTranscriptCount: 0,
+  persistedAdviceCount: 0,
+  selectedSavedSessionId: '',
   transcript: [],
   currentAssistantText: '',
   assistantTextByResponse: new Map(),
@@ -151,6 +171,7 @@ initSettingsDialog();
 initScene();
 wireEvents();
 addAdvice('app', 'まず「接続開始」を押してください。マイク許可後、アバターとの音声対話が始まります。', 'good');
+loadAuthState();
 syncServerSettings();
 
 function loadSettings() {
@@ -257,6 +278,33 @@ function applyServerSettings(data, announce = true) {
   }
 }
 
+async function loadAuthState() {
+  try {
+    const response = await fetch('/.auth/me', { cache: 'no-store' });
+    if (!response.ok) throw new Error(`auth check failed: ${response.status}`);
+    const data = await safeJson(response);
+    const principal = data?.clientPrincipal || null;
+    const roles = Array.isArray(principal?.userRoles) ? principal.userRoles : [];
+    state.authUser = principal && roles.includes('authenticated') ? principal : null;
+  } catch {
+    state.authUser = null;
+  } finally {
+    state.authChecked = true;
+    renderAuthState();
+    if (state.authUser) loadSavedSessions();
+  }
+}
+
+function renderAuthState() {
+  const details = state.authUser?.userDetails || '';
+  if (els.accountStatus) {
+    els.accountStatus.textContent = details ? `account: ${details}` : 'account: local/anonymous';
+    els.accountStatus.title = details || 'local/anonymous';
+  }
+  if (els.btnLogin) els.btnLogin.style.display = state.authUser ? 'none' : '';
+  if (els.btnLogout) els.btnLogout.style.display = state.authUser ? '' : 'none';
+}
+
 function initTabs() {
   for (const tab of document.querySelectorAll('.tab')) {
     tab.addEventListener('click', () => {
@@ -308,11 +356,14 @@ function wireEvents() {
   });
   els.btnHealth.addEventListener('click', checkHealth);
   els.btnBenchAdvisor.addEventListener('click', benchmarkAdvisorModels);
+  els.btnRefreshLogs.addEventListener('click', loadSavedSessions);
+  els.btnDeleteLog.addEventListener('click', deleteSelectedSavedSession);
   els.btnClearAdvice.addEventListener('click', () => {
     els.adviceFeed.innerHTML = '';
     setStageAdvice('アドバイス');
   });
   els.btnClearTranscript.addEventListener('click', () => {
+    closeCurrentLogSession('cleared');
     state.transcript = [];
     state.userTextByItem.clear();
     clearUserTurnState();
@@ -327,7 +378,10 @@ function wireEvents() {
     els.eventFeed.innerHTML = '';
   });
   els.btnExportEvents.addEventListener('click', exportDiagnosticEvents);
-  window.addEventListener('beforeunload', stopRealtime);
+  window.addEventListener('beforeunload', () => {
+    flushLogItems();
+    stopRealtime(false);
+  });
 }
 
 function initScene() {
@@ -1751,6 +1805,7 @@ async function stopRealtime(showMessage = true, sessionId = state.activeRealtime
   els.btnDisconnect.disabled = true;
   setConnectionStatus('idle');
   setAvatarMood('neutral');
+  await closeCurrentLogSession('realtime_stopped');
   if (showMessage) addAdvice('app', '接続を終了しました。', 'warn');
 }
 
@@ -1806,18 +1861,20 @@ async function sendText() {
 }
 
 function addTranscript(role, text, options = {}) {
-  state.transcript.push({
+  const item = {
     role,
     text,
     at: new Date().toISOString(),
     perfAt: Number(options.perfAt) || performance.now(),
     sourceId: options.sourceId || ''
-  });
+  };
+  state.transcript.push(item);
   state.transcript.sort((a, b) => Number(a.perfAt || 0) - Number(b.perfAt || 0));
   if (state.transcript.length > 80) state.transcript.shift();
   renderTranscriptFeed();
   renderStageTranscript();
   updateVRConversationPanels();
+  queueTranscriptLog(role, text, item);
 }
 
 function renderTranscriptFeed() {
@@ -1856,6 +1913,7 @@ function addAdvice(source, text, label = 'good', meta = '') {
   if (shouldShowStageAdvice(source)) {
     setStageAdvice(text);
   }
+  queueAdviceLog(source, text, label, meta);
 }
 
 function shouldShowStageAdvice(source) {
@@ -1880,6 +1938,254 @@ function compactStageText(text, limit) {
   const normalized = normalizeStageText(text);
   if (normalized.length <= limit) return normalized;
   return `${normalized.slice(0, Math.max(0, limit - 1)).trim()}…`;
+}
+
+function canPersistLogs() {
+  return Boolean(state.authUser);
+}
+
+function nextLogSequence() {
+  state.logSequence += 1;
+  return state.logSequence;
+}
+
+function queueTranscriptLog(role, text, item) {
+  queueLogItem({
+    kind: 'transcript',
+    role,
+    text,
+    at: item.at,
+    id: item.sourceId || `transcript-${item.at}-${state.logSequence + 1}`,
+    meta: {
+      sourceId: item.sourceId || '',
+      perfAt: Math.round(Number(item.perfAt || 0))
+    }
+  });
+}
+
+function queueAdviceLog(source, text, label, meta) {
+  if (!shouldPersistAdvice(source)) return;
+  queueLogItem({
+    kind: 'advice',
+    role: 'system',
+    text,
+    label,
+    source,
+    at: new Date().toISOString(),
+    id: `advice-${Date.now().toString(36)}-${state.logSequence + 1}`,
+    meta: { displayMeta: meta || '' }
+  });
+}
+
+function shouldPersistAdvice(source) {
+  return /^LLM\b/.test(source) || /^instant\b/.test(source);
+}
+
+function queueLogItem(item) {
+  if (!canPersistLogs()) return;
+  const sequence = nextLogSequence();
+  state.pendingLogItems.push({ ...item, sequence });
+  if (item.kind === 'transcript') state.persistedTranscriptCount += 1;
+  if (item.kind === 'advice') state.persistedAdviceCount += 1;
+  state.persistedLogItemCount += 1;
+  scheduleLogFlush();
+}
+
+function scheduleLogFlush(delayMs = LOG_FLUSH_DELAY_MS) {
+  clearTimeout(state.logFlushTimer);
+  state.logFlushTimer = setTimeout(flushLogItems, delayMs);
+}
+
+async function ensureLogSession() {
+  if (!canPersistLogs()) return '';
+  if (state.logSessionId) return state.logSessionId;
+
+  const firstUserText = state.transcript.find((item) => item.role === 'user')?.text || '';
+  const title = firstUserText ? compactStageText(firstUserText, 48) : '会話ログ';
+  const startedAt = new Date().toISOString();
+  const response = await fetch('/api/log-sessions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title, startedAt })
+  });
+  const data = await safeJson(response);
+  if (!response.ok) throw new Error(data.error || `log session failed: ${response.status}`);
+  state.logSessionId = data.sessionId;
+  state.logSessionStartedAt = startedAt;
+  return state.logSessionId;
+}
+
+async function flushLogItems() {
+  clearTimeout(state.logFlushTimer);
+  if (!canPersistLogs() || state.logFlushInFlight || !state.pendingLogItems.length) return;
+  state.logFlushInFlight = true;
+  const items = state.pendingLogItems.splice(0, 50);
+  try {
+    const sessionId = await ensureLogSession();
+    if (!sessionId) return;
+    const response = await fetch('/api/log-items', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sessionId,
+        items,
+        summary: logSessionSummary()
+      })
+    });
+    const data = await safeJson(response);
+    if (!response.ok) throw new Error(data.error || `log save failed: ${response.status}`);
+  } catch (error) {
+    state.pendingLogItems.unshift(...items);
+    logEvent({ type: 'client.log_save_failed', error: error.message || String(error), pending: state.pendingLogItems.length });
+  } finally {
+    state.logFlushInFlight = false;
+    if (state.pendingLogItems.length) scheduleLogFlush(1500);
+  }
+}
+
+function logSessionSummary(extra = {}) {
+  const firstUserText = state.transcript.find((item) => item.role === 'user')?.text || '';
+  return {
+    title: firstUserText ? compactStageText(firstUserText, 48) : '会話ログ',
+    itemCount: state.persistedLogItemCount,
+    transcriptCount: state.persistedTranscriptCount,
+    adviceCount: state.persistedAdviceCount,
+    ...extra
+  };
+}
+
+async function closeCurrentLogSession(reason = 'closed') {
+  if (!canPersistLogs()) {
+    resetCurrentLogSession();
+    return;
+  }
+  await flushLogItems();
+  if (!state.logSessionId) {
+    resetCurrentLogSession();
+    return;
+  }
+  try {
+    await fetch('/api/log-sessions', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sessionId: state.logSessionId,
+        ...logSessionSummary({ endedAt: new Date().toISOString(), closeReason: reason })
+      })
+    });
+    loadSavedSessions();
+  } catch (error) {
+    logEvent({ type: 'client.log_session_close_failed', reason, error: error.message || String(error) });
+  } finally {
+    resetCurrentLogSession();
+  }
+}
+
+function resetCurrentLogSession() {
+  state.logSessionId = '';
+  state.logSessionStartedAt = '';
+  state.logSequence = 0;
+  state.pendingLogItems = [];
+  state.persistedLogItemCount = 0;
+  state.persistedTranscriptCount = 0;
+  state.persistedAdviceCount = 0;
+  clearTimeout(state.logFlushTimer);
+  state.logFlushTimer = null;
+}
+
+async function loadSavedSessions() {
+  if (!canPersistLogs()) {
+    renderSavedSessions([]);
+    if (els.savedLogFeed) els.savedLogFeed.innerHTML = '<div class="card"><div class="body">ログインすると保存ログを表示できます。</div></div>';
+    return;
+  }
+  try {
+    const response = await fetch('/api/log-sessions?limit=30', { cache: 'no-store' });
+    const data = await safeJson(response);
+    if (!response.ok) throw new Error(data.error || `log sessions failed: ${response.status}`);
+    renderSavedSessions(data.sessions || []);
+  } catch (error) {
+    if (els.savedSessionsFeed) {
+      els.savedSessionsFeed.innerHTML = `<div class="card risk"><div class="body">${escapeHtml(error.message || String(error))}</div></div>`;
+    }
+  }
+}
+
+function renderSavedSessions(sessions) {
+  if (!els.savedSessionsFeed) return;
+  els.savedSessionsFeed.innerHTML = '';
+  if (!sessions.length) {
+    els.savedSessionsFeed.innerHTML = '<div class="card"><div class="body">保存済みログはまだありません。</div></div>';
+    if (els.btnDeleteLog) els.btnDeleteLog.disabled = true;
+    return;
+  }
+  for (const session of sessions) {
+    const card = document.createElement('button');
+    card.type = 'button';
+    card.className = `card session${session.sessionId === state.selectedSavedSessionId ? ' active' : ''}`;
+    card.innerHTML = `<div class="meta"><span>${escapeHtml(formatLogDate(session.updatedAt || session.startedAt))}</span><span>${Number(session.itemCount || 0)}</span></div><div class="body">${escapeHtml(session.title || '会話ログ')}</div>`;
+    card.addEventListener('click', () => loadSavedLogItems(session.sessionId));
+    els.savedSessionsFeed.appendChild(card);
+  }
+}
+
+async function loadSavedLogItems(sessionId) {
+  if (!sessionId) return;
+  state.selectedSavedSessionId = sessionId;
+  if (els.btnDeleteLog) els.btnDeleteLog.disabled = false;
+  try {
+    const response = await fetch(`/api/log-items?sessionId=${encodeURIComponent(sessionId)}`, { cache: 'no-store' });
+    const data = await safeJson(response);
+    if (!response.ok) throw new Error(data.error || `log items failed: ${response.status}`);
+    renderSavedLogItems(data.items || []);
+    loadSavedSessions();
+  } catch (error) {
+    if (els.savedLogFeed) {
+      els.savedLogFeed.innerHTML = `<div class="card risk"><div class="body">${escapeHtml(error.message || String(error))}</div></div>`;
+    }
+  }
+}
+
+function renderSavedLogItems(items) {
+  if (!els.savedLogFeed) return;
+  els.savedLogFeed.innerHTML = '';
+  if (!items.length) {
+    els.savedLogFeed.innerHTML = '<div class="card"><div class="body">このセッションに保存項目はありません。</div></div>';
+    return;
+  }
+  for (const item of items) {
+    const label = item.kind === 'advice' ? (item.label || 'good') : '';
+    const card = document.createElement('div');
+    card.className = `card ${item.kind === 'advice' ? labelToClass(label) : `transcript ${item.role || 'user'}`}`;
+    const roleLabel = item.kind === 'advice'
+      ? `助言 ${item.source || ''}`.trim()
+      : (item.role === 'assistant' ? 'アバター' : 'あなた');
+    card.innerHTML = `<div class="meta"><span>${escapeHtml(roleLabel)}</span><span>${escapeHtml(formatLogDate(item.at))}</span></div><div class="body">${escapeHtml(item.text)}</div>`;
+    els.savedLogFeed.appendChild(card);
+  }
+  scrollToBottom(els.savedLogFeed);
+}
+
+async function deleteSelectedSavedSession() {
+  const sessionId = state.selectedSavedSessionId;
+  if (!sessionId || !window.confirm('選択中の保存ログを削除します。')) return;
+  try {
+    const response = await fetch(`/api/log-sessions?sessionId=${encodeURIComponent(sessionId)}`, { method: 'DELETE' });
+    const data = await safeJson(response);
+    if (!response.ok) throw new Error(data.error || `delete failed: ${response.status}`);
+    state.selectedSavedSessionId = '';
+    if (els.savedLogFeed) els.savedLogFeed.innerHTML = '';
+    if (els.btnDeleteLog) els.btnDeleteLog.disabled = true;
+    loadSavedSessions();
+  } catch (error) {
+    addAdvice('app', `保存ログの削除に失敗しました: ${error.message || error}`, 'risk');
+  }
+}
+
+function formatLogDate(value) {
+  const date = value ? new Date(value) : null;
+  if (!date || Number.isNaN(date.getTime())) return '';
+  return date.toLocaleString('ja-JP', { hour12: false });
 }
 
 function immediateAdvice(text) {

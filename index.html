@@ -24,6 +24,9 @@
       <div class="subtitle">VRM avatar + Azure OpenAI Realtime + parallel advice</div>
     </div>
     <div class="toolbar">
+      <span id="accountStatus" class="accountStatus">account: checking</span>
+      <a id="btnLogin" class="button secondary" href="/login">ログイン</a>
+      <a id="btnLogout" class="button secondary" href="/logout">ログアウト</a>
       <button id="btnHealth" class="secondary">API確認</button>
       <button id="btnSettings" class="secondary">設定</button>
       <button id="btnConnect" class="primary">接続開始</button>
@@ -54,6 +57,7 @@
       <div class="tabs">
         <button class="tab active" data-tab="advice">助言</button>
         <button class="tab" data-tab="transcript">文字起こし</button>
+        <button class="tab" data-tab="logs">保存ログ</button>
         <button class="tab" data-tab="metrics">計測</button>
         <button class="tab" data-tab="events">イベント</button>
       </div>
@@ -72,6 +76,20 @@
           <button id="btnClearTranscript" class="secondary small">クリア</button>
         </div>
         <div id="transcriptFeed" class="feed"></div>
+      </div>
+
+      <div id="logsTab" class="tabBody">
+        <div class="panelHeader">
+          <h2>保存ログ</h2>
+          <div class="buttonGroup">
+            <button id="btnRefreshLogs" class="secondary small">更新</button>
+            <button id="btnDeleteLog" class="danger small" disabled>削除</button>
+          </div>
+        </div>
+        <div class="logsLayout">
+          <div id="savedSessionsFeed" class="feed compact"></div>
+          <div id="savedLogFeed" class="feed"></div>
+        </div>
       </div>
 
       <div id="metricsTab" class="tabBody">

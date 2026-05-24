@@ -11,6 +11,7 @@ const {
   jsonResponse,
   errorResponse
 } = require('../_shared/azureOpenAI');
+const { hasLogStorageConfig } = require('../_shared/logStore');
 
 module.exports = async function (context) {
   try {
@@ -27,8 +28,11 @@ module.exports = async function (context) {
       advisorEndpointHost: advisorEndpoint ? new URL(advisorEndpoint).host : null,
       hasAdvisorApiKey: Boolean(advisorApiKey()),
       avatarTextDeployment: process.env.AVATAR_TEXT_DEPLOYMENT || null,
+      logStoreReady: hasLogStorageConfig(),
+      logSessionsTable: process.env.ZATSUCOACH_LOG_SESSIONS_TABLE || 'ZatsucoachSessions',
+      logItemsTable: process.env.ZATSUCOACH_LOG_ITEMS_TABLE || 'ZatsucoachItems',
       transcribeDiagnosticEnabled: String(process.env.ENABLE_TRANSCRIBE_DIAGNOSTIC || '').toLowerCase() === 'true',
-      codeVersion: '2026-05-24-realtime-manual-vad-noise-gate',
+      codeVersion: '2026-05-24-auth-logs',
       node: process.version
     });
   } catch (error) {

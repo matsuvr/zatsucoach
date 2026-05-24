@@ -21,17 +21,21 @@ body {
   font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 button, input, select, textarea { font: inherit; }
-button {
+button, .button {
   border: 1px solid var(--border);
   background: var(--panel2);
   color: var(--text);
   padding: 0.58rem 0.85rem;
   border-radius: 0.7rem;
   cursor: pointer;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 button:disabled { opacity: 0.45; cursor: not-allowed; }
-button.primary { background: #1f6feb; border-color: #388bfd; }
-button.secondary { background: #21262d; }
+button.primary, .button.primary { background: #1f6feb; border-color: #388bfd; }
+button.secondary, .button.secondary { background: #21262d; }
 button.danger { background: #4a1515; border-color: #7d2525; }
 button.small { padding: 0.35rem 0.55rem; font-size: 0.86rem; }
 .buttonGroup { display: flex; gap: 0.45rem; flex-wrap: wrap; justify-content: flex-end; }
@@ -49,6 +53,16 @@ button.small { padding: 0.35rem 0.55rem; font-size: 0.86rem; }
 .product { font-size: 1.25rem; font-weight: 700; letter-spacing: .01em; }
 .subtitle { color: var(--muted); font-size: 0.87rem; margin-top: 0.15rem; }
 .toolbar { display: flex; gap: 0.55rem; flex-wrap: wrap; justify-content: flex-end; }
+.accountStatus {
+  display: inline-flex;
+  align-items: center;
+  max-width: 18rem;
+  color: var(--muted);
+  font-size: 0.86rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .layout {
   display: grid;
   grid-template-columns: minmax(420px, 1.35fr) minmax(360px, 0.9fr);
@@ -189,6 +203,13 @@ textarea { resize: vertical; line-height: 1.45; }
 .tab.active { background: #1f6feb; border-color: #388bfd; }
 .tabBody { display: none; min-height: 0; overflow: hidden; }
 .tabBody.active { display: grid; grid-template-rows: auto 1fr; }
+.logsLayout {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(170px, 0.38fr) minmax(0, 1fr);
+  overflow: hidden;
+}
+.logsLayout .feed:first-child { border-right: 1px solid var(--border); }
 .panelHeader {
   display: flex;
   align-items: center;
@@ -217,6 +238,8 @@ h2 { font-size: 1rem; margin: 0; }
 .card.risk { border-color: rgba(248, 81, 73, .58); }
 .card .meta { color: var(--muted); font-size: 0.78rem; margin-bottom: 0.32rem; display: flex; justify-content: space-between; gap: 1rem; }
 .card .body { white-space: pre-wrap; line-height: 1.45; }
+.card.session { cursor: pointer; width: 100%; text-align: left; display: block; }
+.card.session.active { border-color: #58a6ff; background: rgba(31, 111, 235, 0.18); }
 .transcript.user { margin-right: 2rem; }
 .transcript.assistant { margin-left: 2rem; }
 .transcript .role { color: var(--accent); font-size: 0.78rem; margin-bottom: 0.2rem; }
@@ -253,5 +276,7 @@ code { color: #a5d6ff; }
   .stageAdviceOverlay { width: min(88%, 520px); }
   .coachPanel { min-height: 70vh; }
   .topbar { align-items: flex-start; flex-direction: column; }
+  .logsLayout { grid-template-columns: 1fr; }
+  .logsLayout .feed:first-child { border-right: 0; border-bottom: 1px solid var(--border); max-height: 14rem; }
   .settingsGrid { grid-template-columns: 1fr; }
 }

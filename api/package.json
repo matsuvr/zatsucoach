@@ -8,5 +8,8 @@
   },
   "scripts": {
     "start": "func start"
+  },
+  "dependencies": {
+    "@azure/data-tables": "^13.3.2"
   }
 }

@@ -13,6 +13,9 @@
     "ADVISOR_DEPLOYMENT": "grok-4-20-non-reasoning",
     "AVATAR_TEXT_DEPLOYMENT": "gpt-5.4-nano",
     "TRANSCRIPTION_DEPLOYMENT": "gpt-4o-mini-transcribe",
+    "ZATSUCOACH_LOG_STORAGE_CONNECTION_STRING": "UseDevelopmentStorage=true",
+    "ZATSUCOACH_LOG_SESSIONS_TABLE": "ZatsucoachSessions",
+    "ZATSUCOACH_LOG_ITEMS_TABLE": "ZatsucoachItems",
     "ENABLE_TRANSCRIBE_DIAGNOSTIC": "false"
   }
 }
