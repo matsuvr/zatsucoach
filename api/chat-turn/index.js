@@ -14,7 +14,7 @@ module.exports = async function (context, req) {
   try {
     const body = parseJsonBody(req);
     const instructions = String(body.instructions || 'あなたは雑談練習用のアバターです。日本語で1文だけ返してください。').slice(0, 6000);
-    const maxTokens = clampNumber(body.maxTokens, 192, 32, 1024);
+    const maxTokens = clampNumber(body.maxTokens, 2048, 512, 4096);
     const messages = buildChatMessages({
       instructions,
       transcript: body.transcript,

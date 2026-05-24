@@ -34,6 +34,7 @@ button.primary { background: #1f6feb; border-color: #388bfd; }
 button.secondary { background: #21262d; }
 button.danger { background: #4a1515; border-color: #7d2525; }
 button.small { padding: 0.35rem 0.55rem; font-size: 0.86rem; }
+.buttonGroup { display: flex; gap: 0.45rem; flex-wrap: wrap; justify-content: flex-end; }
 
 .topbar {
   display: flex;

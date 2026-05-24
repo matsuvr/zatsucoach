@@ -39,7 +39,6 @@ function buildRealtimeSession(body, deployment) {
   );
   const vadThreshold = clampNumber(body.vadThreshold, 0.55, 0.05, 0.95);
   const vadSilenceMs = clampNumber(body.vadSilenceMs, 650, 120, 1200);
-  const maxResponseTokens = clampNumber(body.maxResponseTokens, 96, 16, 4096);
   const instructions = String(body.instructions || process.env.REALTIME_INSTRUCTIONS || '').slice(0, 12000);
 
   return {
@@ -47,7 +46,7 @@ function buildRealtimeSession(body, deployment) {
     model: deployment,
     instructions,
     output_modalities: ['audio'],
-    max_response_output_tokens: maxResponseTokens,
+    max_output_tokens: 'inf',
     audio: {
       input: {
         format: {
@@ -63,7 +62,8 @@ function buildRealtimeSession(body, deployment) {
           threshold: vadThreshold,
           prefix_padding_ms: 300,
           silence_duration_ms: vadSilenceMs,
-          create_response: true
+          create_response: true,
+          interrupt_response: false
         }
       },
       output: {
@@ -132,7 +132,7 @@ module.exports = async function (context, req) {
       sessionConfig: configMode === 'client_session_update' ? clientSessionUpdate(session) : undefined,
       session: {
         output_modalities: session.output_modalities,
-        max_response_output_tokens: session.max_response_output_tokens,
+        max_output_tokens: session.max_output_tokens,
         turn_detection: session.audio.input.turn_detection,
         transcription: {
           model: session.audio.input.transcription.model,

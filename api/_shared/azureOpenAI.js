@@ -1,20 +1,69 @@
 'use strict';
 
-function endpointBase() {
-  let endpoint = process.env.AZURE_OPENAI_ENDPOINT || '';
+function normalizeEndpoint(endpoint) {
+  return String(endpoint || '')
+    .trim()
+    .replace(/\/+$/, '')
+    .replace(/\/api\/models$/i, '')
+    .replace(/\/models$/i, '')
+    .replace(/\/openai\/v1$/i, '')
+    .replace(/\/openai$/i, '');
+}
+
+function endpointBase(endpointOverride = '') {
+  let endpoint = endpointOverride || process.env.AZURE_OPENAI_ENDPOINT || '';
   const resource = process.env.AZURE_OPENAI_RESOURCE || '';
   if (!endpoint && resource) endpoint = `https://${resource}.openai.azure.com`;
-  endpoint = endpoint.trim().replace(/\/+$/, '');
-  endpoint = endpoint.replace(/\/openai\/v1$/i, '').replace(/\/openai$/i, '');
-  return endpoint;
+  return normalizeEndpoint(endpoint);
+}
+
+function advisorEndpointBase() {
+  return endpointBase(
+    process.env.ADVISOR_ENDPOINT ||
+    process.env.FOUNDRY_MODELS_ENDPOINT ||
+    process.env.AZURE_INFERENCE_ENDPOINT ||
+    ''
+  ) || endpointBase();
+}
+
+function advisorEndpointRaw() {
+  return process.env.ADVISOR_ENDPOINT ||
+    process.env.FOUNDRY_MODELS_ENDPOINT ||
+    process.env.AZURE_INFERENCE_ENDPOINT ||
+    '';
+}
+
+function normalizeAdvisorRoute(value) {
+  const route = String(value || '').trim().toLowerCase().replace(/[-\s]+/g, '_');
+  if (['foundry', 'foundry_models', 'model_inference', 'models'].includes(route)) return 'foundry_models';
+  if (['openai', 'openai_v1', 'v1'].includes(route)) return 'openai_v1';
+  return 'auto';
+}
+
+function advisorEndpointRoute() {
+  const configured = normalizeAdvisorRoute(process.env.ADVISOR_API_ROUTE || process.env.ADVISOR_ROUTE || '');
+  if (configured !== 'auto') return configured;
+  return /\/(?:api\/)?models\/?$/i.test(String(advisorEndpointRaw()).trim()) ? 'foundry_models' : 'auto';
 }
 
 function hasConfig() {
   return Boolean(endpointBase() && process.env.AZURE_OPENAI_API_KEY);
 }
 
-function authHeaders(extra = {}) {
-  const apiKey = process.env.AZURE_OPENAI_API_KEY;
+function advisorApiKey() {
+  return process.env.ADVISOR_API_KEY ||
+    process.env.FOUNDRY_MODELS_API_KEY ||
+    process.env.AZURE_INFERENCE_CREDENTIAL ||
+    process.env.AZURE_OPENAI_API_KEY ||
+    '';
+}
+
+function hasAdvisorConfig() {
+  return Boolean(advisorEndpointBase() && advisorApiKey());
+}
+
+function authHeaders(extra = {}, apiKeyOverride = '') {
+  const apiKey = apiKeyOverride || process.env.AZURE_OPENAI_API_KEY;
   if (!apiKey) throw new Error('AZURE_OPENAI_API_KEY is not set');
   return { 'api-key': apiKey, ...extra };
 }
@@ -26,19 +75,37 @@ function safeDeployment(value, fallback) {
   return raw;
 }
 
+function advisorDeploymentAlias(value) {
+  const raw = String(value || '').trim();
+  const key = raw.toLowerCase();
+  const aliases = {
+    'kimi-2.6': 'Kimi-K2.6',
+    'kimi-k2.6': 'Kimi-K2.6',
+    'kimi-k2-6': 'Kimi-K2.6',
+    'kimi-2.5': 'Kimi-K2.5',
+    'kimi-k2.5': 'Kimi-K2.5',
+    'kimi-k2-5': 'Kimi-K2.5'
+  };
+  return aliases[key] || raw;
+}
+
+function advisorDeployment(value, fallback) {
+  return advisorDeploymentAlias(safeDeployment(value, fallback));
+}
+
 function clampNumber(value, fallback, min, max) {
   const n = Number(value);
   if (!Number.isFinite(n)) return fallback;
   return Math.min(max, Math.max(min, n));
 }
 
-async function postJson(url, body, timeoutMs = 30000) {
+async function postJson(url, body, timeoutMs = 30000, options = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(url, {
       method: 'POST',
-      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      headers: authHeaders({ 'Content-Type': 'application/json' }, options.apiKey),
       body: JSON.stringify(body),
       signal: controller.signal
     });
@@ -62,6 +129,12 @@ function errorResponse(context, error, status = 500, extra = {}) {
       error: error && error.message ? error.message : String(error),
       attempts: Array.isArray(error?.attempts) ? error.attempts : undefined,
       retryAfterMs: Number.isFinite(error?.retryAfterMs) ? error.retryAfterMs : undefined,
+      rateLimits: error?.rateLimits,
+      requestIds: error?.requestIds,
+      endpoint: error?.endpoint,
+      responseHeaders: error?.responseHeaders,
+      serviceResponseText: error?.serviceResponseText,
+      serviceResponseBody: error?.serviceResponseBody,
       ...extra
     }
   };
@@ -85,21 +158,44 @@ function extractChatText(data) {
   return data?.choices?.[0]?.message?.content || data?.choices?.[0]?.delta?.content || data?.output_text || '';
 }
 
+function summarizeChoiceMessage(data) {
+  const message = data?.choices?.[0]?.message || {};
+  return {
+    role: message.role || null,
+    contentChars: String(message.content || '').length,
+    reasoningContentChars: String(message.reasoning_content || '').length,
+    finishReason: data?.choices?.[0]?.finish_reason || null,
+    usage: data?.usage || null
+  };
+}
+
 class AzureOpenAIRequestError extends Error {
-  constructor(message, { status = 500, attempts = [], retryAfterMs = 0 } = {}) {
+  constructor(message, { status = 500, attempts = [], retryAfterMs = 0, rateLimits = {}, requestIds = {}, endpoint = null, responseHeaders = {}, serviceResponseText = '', serviceResponseBody = null } = {}) {
     super(message);
     this.name = 'AzureOpenAIRequestError';
     this.status = status;
     this.attempts = attempts;
     this.retryAfterMs = retryAfterMs;
+    this.rateLimits = rateLimits;
+    this.requestIds = requestIds;
+    this.endpoint = endpoint;
+    this.responseHeaders = responseHeaders;
+    this.serviceResponseText = serviceResponseText;
+    this.serviceResponseBody = serviceResponseBody;
   }
 }
 
 function apiErrorMessage(result) {
-  return result.data?.error?.message || result.data?.message || result.text || `chat completion failed: ${result.response.status}`;
+  if (!result) return '';
+  return result.data?.error?.message || result.data?.message || result.text || `HTTP ${result.response.status}`;
 }
 
 function retryAfterMs(headers) {
+  const retryAfterMsValue = headers?.get?.('retry-after-ms');
+  if (retryAfterMsValue) {
+    const ms = Number(retryAfterMsValue);
+    if (Number.isFinite(ms)) return Math.max(0, Math.round(ms));
+  }
   const retryAfter = headers?.get?.('retry-after');
   if (!retryAfter) return 0;
   const seconds = Number(retryAfter);
@@ -107,6 +203,55 @@ function retryAfterMs(headers) {
   const dateMs = Date.parse(retryAfter);
   if (Number.isFinite(dateMs)) return Math.max(0, dateMs - Date.now());
   return 0;
+}
+
+function rateLimitHeaders(headers) {
+  if (!headers?.get) return {};
+  const names = [
+    'x-ratelimit-limit-requests',
+    'x-ratelimit-limit-tokens',
+    'x-ratelimit-remaining-requests',
+    'x-ratelimit-remaining-tokens',
+    'x-ratelimit-reset-requests',
+    'x-ratelimit-reset-tokens',
+    'retry-after-ms',
+    'retry-after'
+  ];
+  return names.reduce((acc, name) => {
+    const value = headers.get(name);
+    if (value) acc[name] = value;
+    return acc;
+  }, {});
+}
+
+function requestIdHeaders(headers) {
+  if (!headers?.get) return {};
+  const names = ['apim-request-id', 'x-ms-request-id', 'x-request-id'];
+  return names.reduce((acc, name) => {
+    const value = headers.get(name);
+    if (value) acc[name] = value;
+    return acc;
+  }, {});
+}
+
+function responseHeaders(headers) {
+  if (!headers?.forEach) return {};
+  const selected = {};
+  headers.forEach((value, name) => {
+    const key = String(name || '').toLowerCase();
+    if (
+      key === 'content-type' ||
+      key === 'warning' ||
+      key.startsWith('x-ms-') ||
+      key.startsWith('x-ratelimit-') ||
+      key.startsWith('retry-after') ||
+      key === 'apim-request-id' ||
+      key === 'x-request-id'
+    ) {
+      selected[key] = value;
+    }
+  });
+  return selected;
 }
 
 function isParameterError(message, parameterName) {
@@ -143,12 +288,50 @@ function summarizeChatBody(body) {
   };
 }
 
-function recordAttempt(attempts, name, body, result) {
+function serviceResponseText(result) {
+  if (!result) return '';
+  return result.text || (result.data && Object.keys(result.data).length ? JSON.stringify(result.data) : '');
+}
+
+function errorCauseSummary(error) {
+  const cause = error?.cause;
+  if (!cause || typeof cause !== 'object') return null;
+  return {
+    name: cause.name || null,
+    code: cause.code || null,
+    errno: cause.errno || null,
+    syscall: cause.syscall || null,
+    hostname: cause.hostname || null,
+    message: cause.message || null
+  };
+}
+
+function recordAttempt(attempts, name, body, result, meta = {}) {
   attempts.push({
     name,
+    route: meta.route,
+    url: meta.url,
     status: result.response.status,
-    message: apiErrorMessage(result),
+    message: serviceResponseText(result) || apiErrorMessage(result),
+    responseText: serviceResponseText(result),
+    responseBody: result.data,
+    responseHeaders: responseHeaders(result.response.headers),
     retryAfterMs: retryAfterMs(result.response.headers),
+    rateLimits: rateLimitHeaders(result.response.headers),
+    requestIds: requestIdHeaders(result.response.headers),
+    request: summarizeChatBody(body)
+  });
+}
+
+function recordNetworkAttempt(attempts, name, body, error, meta = {}) {
+  attempts.push({
+    name,
+    route: meta.route,
+    url: meta.url,
+    status: 0,
+    message: error?.message || String(error),
+    errorName: error?.name || null,
+    errorCause: errorCauseSummary(error),
     request: summarizeChatBody(body)
   });
 }
@@ -202,69 +385,248 @@ function buildChatMessages({ instructions, transcript, maxItems = 60, maxChars =
   return messages;
 }
 
-async function chatCompletion({ deployment, messages, maxTokens = 96, temperature = 0.2, reasoningEffort = '', timeoutMs = 30000 }) {
-  const endpoint = endpointBase();
-  if (!endpoint) throw new Error('AZURE_OPENAI_ENDPOINT or AZURE_OPENAI_RESOURCE is not set');
-  const model = safeDeployment(deployment, process.env.ADVISOR_DEPLOYMENT);
-  const url = `${endpoint}/openai/v1/chat/completions`;
-  const attempts = [];
+function isServicesAiEndpoint(baseEndpoint) {
+  try {
+    return new URL(baseEndpoint).host.toLowerCase().endsWith('.services.ai.azure.com');
+  } catch {
+    return false;
+  }
+}
+
+function isOpenAIEndpoint(baseEndpoint) {
+  try {
+    return new URL(baseEndpoint).host.toLowerCase().endsWith('.openai.azure.com');
+  } catch {
+    return false;
+  }
+}
+
+function derivedServicesEndpoint(baseEndpoint) {
+  try {
+    const url = new URL(baseEndpoint);
+    url.host = url.host.replace(/\.openai\.azure\.com$/i, '.services.ai.azure.com');
+    return url.toString().replace(/\/+$/, '');
+  } catch {
+    return '';
+  }
+}
+
+function isKimiDeployment(model) {
+  return String(model || '').toLowerCase().includes('kimi');
+}
+
+function chatCompletionRoutes(baseEndpoint, routeHint, model) {
+  const route = normalizeAdvisorRoute(routeHint);
+  if (route === 'foundry_models') return [{ route: 'foundry_models', baseEndpoint }];
+  if (route === 'openai_v1') return [{ route: 'openai_v1', baseEndpoint }];
+  const routes = isServicesAiEndpoint(baseEndpoint)
+    ? [{ route: 'openai_v1', baseEndpoint }, { route: 'foundry_models', baseEndpoint }]
+    : [{ route: 'openai_v1', baseEndpoint }];
+  const servicesEndpoint = isKimiDeployment(model) && isOpenAIEndpoint(baseEndpoint) ? derivedServicesEndpoint(baseEndpoint) : '';
+  if (servicesEndpoint) routes.push({ route: 'foundry_models', baseEndpoint: servicesEndpoint });
+  return routes;
+}
+
+function chatCompletionUrl(baseEndpoint, route) {
+  if (route === 'foundry_models') {
+    const apiVersion = process.env.ADVISOR_MODEL_INFERENCE_API_VERSION || '2024-05-01-preview';
+    return `${baseEndpoint}/models/chat/completions?api-version=${encodeURIComponent(apiVersion)}`;
+  }
+  return `${baseEndpoint}/openai/v1/chat/completions`;
+}
+
+function buildChatCompletionBody(route, { model, messages, maxTokens, temperature, reasoningEffort }) {
+  let tokenLimit = clampNumber(maxTokens, 2048, 512, 4096);
+  if (route === 'foundry_models') {
+    if (isKimiDeployment(model)) tokenLimit = 4096;
+    const body = {
+      model,
+      messages,
+      temperature,
+      max_tokens: tokenLimit
+    };
+    if (isKimiDeployment(model)) body.thinking = { type: 'disabled' };
+    return body;
+  }
   const body = {
     model,
     messages,
     temperature,
     n: 1,
-    max_completion_tokens: clampNumber(maxTokens, 96, 16, 4096)
+    max_completion_tokens: tokenLimit
   };
-  if (reasoningEffort) body.reasoning_effort = reasoningEffort;
+  if (reasoningEffort && String(reasoningEffort).toLowerCase() !== 'none') body.reasoning_effort = reasoningEffort;
+  return body;
+}
 
-  let result = await postJson(url, body, timeoutMs);
-  if (result.response.ok) return { data: result.data, deployment: model, usedFallback: false };
-  recordAttempt(attempts, 'max_completion_tokens', body, result);
+function shouldTryNextRoute(result) {
+  return [400, 404, 422].includes(result?.response?.status);
+}
 
-  const firstError = apiErrorMessage(result);
-  if (body.reasoning_effort && isParameterError(firstError, 'reasoning_effort')) {
-    const retryBody = { ...body };
-    delete retryBody.reasoning_effort;
-    result = await postJson(url, retryBody, timeoutMs);
-    if (result.response.ok) return { data: result.data, deployment: model, usedFallback: true };
-    recordAttempt(attempts, 'without_reasoning_effort', retryBody, result);
-  }
+async function chatCompletion({ deployment, messages, maxTokens = 2048, temperature = 0.2, reasoningEffort = '', timeoutMs = 30000, endpoint = '', apiKey = '', routeHint = '' }) {
+  const baseEndpoint = endpointBase(endpoint);
+  if (!baseEndpoint) throw new Error('AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_RESOURCE, or advisor endpoint is not set');
+  const model = advisorDeployment(deployment, process.env.ADVISOR_DEPLOYMENT);
+  const attempts = [];
+  const routes = chatCompletionRoutes(baseEndpoint, routeHint, model);
+  let lastResult = null;
+  let lastRoute = routes[0];
+  let lastUrl = '';
 
-  const secondError = apiErrorMessage(result);
-  if (isParameterError(secondError, 'max_completion_tokens')) {
-    if (isReasoningDeployment(model)) {
-      throw new AzureOpenAIRequestError(
-        `Azure OpenAI request failed before legacy fallback. Reasoning deployments must use max_completion_tokens with Chat Completions; not retrying with max_tokens. Last error: ${secondError}`,
-        { status: result.response.status, attempts, retryAfterMs: retryAfterMs(result.response.headers) }
-      );
+  for (let i = 0; i < routes.length; i += 1) {
+    const routeInfo = routes[i];
+    const { route } = routeInfo;
+    const url = chatCompletionUrl(routeInfo.baseEndpoint, route);
+    const body = buildChatCompletionBody(route, { model, messages, maxTokens, temperature, reasoningEffort });
+    const primaryAttemptName = route === 'foundry_models' ? 'foundry_models_max_tokens' : 'openai_v1_max_completion_tokens';
+    lastRoute = route;
+    lastUrl = url;
+
+    let result = null;
+    try {
+      result = await postJson(url, body, timeoutMs, { apiKey });
+    } catch (error) {
+      recordNetworkAttempt(attempts, `${primaryAttemptName}_network_error`, body, error, { route, url });
+      lastRoute = route;
+      lastUrl = url;
+      if (i < routes.length - 1) continue;
+      throw new AzureOpenAIRequestError(error?.message || String(error), {
+        status: 502,
+        attempts,
+        endpoint: { route, url },
+        serviceResponseText: error?.message || String(error),
+        serviceResponseBody: {
+          errorName: error?.name || null,
+          errorCause: errorCauseSummary(error)
+        }
+      });
     }
-    const retryBody = { ...body, max_tokens: body.max_completion_tokens };
-    delete retryBody.max_completion_tokens;
-    delete retryBody.reasoning_effort;
-    result = await postJson(url, retryBody, timeoutMs);
-    if (result.response.ok) return { data: result.data, deployment: model, usedFallback: true };
-    recordAttempt(attempts, 'legacy_max_tokens', retryBody, result);
+    lastResult = result;
+    if (result.response.ok) {
+      return {
+        data: result.data,
+        deployment: model,
+        usedFallback: i > 0,
+        endpoint: { route, url },
+        rateLimits: rateLimitHeaders(result.response.headers),
+        requestIds: requestIdHeaders(result.response.headers),
+        responseHeaders: responseHeaders(result.response.headers),
+        choiceMessage: summarizeChoiceMessage(result.data)
+      };
+    }
+    recordAttempt(attempts, primaryAttemptName, body, result, { route, url });
+
+    if (route === 'openai_v1') {
+      const firstError = apiErrorMessage(result);
+      if (body.reasoning_effort && isParameterError(firstError, 'reasoning_effort')) {
+        const retryBody = { ...body };
+        delete retryBody.reasoning_effort;
+        try {
+          result = await postJson(url, retryBody, timeoutMs, { apiKey });
+        } catch (error) {
+          recordNetworkAttempt(attempts, 'openai_v1_without_reasoning_effort_network_error', retryBody, error, { route, url });
+          if (i < routes.length - 1) break;
+          throw new AzureOpenAIRequestError(error?.message || String(error), {
+            status: 502,
+            attempts,
+            endpoint: { route, url },
+            serviceResponseText: error?.message || String(error),
+            serviceResponseBody: {
+              errorName: error?.name || null,
+              errorCause: errorCauseSummary(error)
+            }
+          });
+        }
+        lastResult = result;
+        if (result.response.ok) {
+          return {
+            data: result.data,
+            deployment: model,
+            usedFallback: true,
+            endpoint: { route, url },
+            rateLimits: rateLimitHeaders(result.response.headers),
+            requestIds: requestIdHeaders(result.response.headers),
+            responseHeaders: responseHeaders(result.response.headers),
+            choiceMessage: summarizeChoiceMessage(result.data)
+          };
+        }
+        recordAttempt(attempts, 'openai_v1_without_reasoning_effort', retryBody, result, { route, url });
+      }
+
+      const secondError = apiErrorMessage(result);
+      if (isParameterError(secondError, 'max_completion_tokens') && !isReasoningDeployment(model)) {
+        const retryBody = { ...body, max_tokens: body.max_completion_tokens };
+        delete retryBody.max_completion_tokens;
+        delete retryBody.reasoning_effort;
+        try {
+          result = await postJson(url, retryBody, timeoutMs, { apiKey });
+        } catch (error) {
+          recordNetworkAttempt(attempts, 'openai_v1_legacy_max_tokens_network_error', retryBody, error, { route, url });
+          if (i < routes.length - 1) break;
+          throw new AzureOpenAIRequestError(error?.message || String(error), {
+            status: 502,
+            attempts,
+            endpoint: { route, url },
+            serviceResponseText: error?.message || String(error),
+            serviceResponseBody: {
+              errorName: error?.name || null,
+              errorCause: errorCauseSummary(error)
+            }
+          });
+        }
+        lastResult = result;
+        if (result.response.ok) {
+          return {
+            data: result.data,
+            deployment: model,
+            usedFallback: true,
+            endpoint: { route, url },
+            rateLimits: rateLimitHeaders(result.response.headers),
+            requestIds: requestIdHeaders(result.response.headers),
+            responseHeaders: responseHeaders(result.response.headers),
+            choiceMessage: summarizeChoiceMessage(result.data)
+          };
+        }
+        recordAttempt(attempts, 'openai_v1_legacy_max_tokens', retryBody, result, { route, url });
+      }
+    }
+
+    if (!shouldTryNextRoute(result)) break;
   }
 
-  throw new AzureOpenAIRequestError(apiErrorMessage(result), {
-    status: result.response.status,
+  throw new AzureOpenAIRequestError(serviceResponseText(lastResult) || apiErrorMessage(lastResult), {
+    status: lastResult?.response?.status || 500,
     attempts,
-    retryAfterMs: retryAfterMs(result.response.headers)
+    retryAfterMs: retryAfterMs(lastResult?.response?.headers),
+    rateLimits: rateLimitHeaders(lastResult?.response?.headers),
+    requestIds: requestIdHeaders(lastResult?.response?.headers),
+    endpoint: { route: lastRoute, url: lastUrl },
+    responseHeaders: responseHeaders(lastResult?.response?.headers),
+    serviceResponseText: serviceResponseText(lastResult),
+    serviceResponseBody: lastResult?.data
   });
 }
 
 module.exports = {
   endpointBase,
+  advisorEndpointBase,
+  advisorEndpointRoute,
   hasConfig,
+  hasAdvisorConfig,
+  advisorApiKey,
   authHeaders,
   safeDeployment,
+  advisorDeployment,
   clampNumber,
   postJson,
   errorResponse,
   jsonResponse,
   parseJsonBody,
   extractChatText,
+  summarizeChoiceMessage,
   AzureOpenAIRequestError,
+  rateLimitHeaders,
+  requestIdHeaders,
   estimateTokenCount,
   estimateMessageTokens,
   trimTranscriptByBudget,

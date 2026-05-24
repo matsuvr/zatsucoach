@@ -41,7 +41,7 @@ Common options:
   --advisor-url=https://example.azurestaticapps.net/api/advisor
   --token-url=https://example.azurestaticapps.net/api/realtime-token
   --deployment=gpt-realtime-2
-  --advisor-deployment=gpt-5.4-nano
+  --advisor-deployment=grok-4-20-non-reasoning
   --chunk-seconds=4
   --max-chunks=4
   --headless=true`);
@@ -56,6 +56,8 @@ function endpointBase(endpoint) {
   return String(endpoint || '')
     .trim()
     .replace(/\/+$/, '')
+    .replace(/\/api\/models$/i, '')
+    .replace(/\/models$/i, '')
     .replace(/\/openai\/v1$/i, '')
     .replace(/\/openai$/i, '');
 }
@@ -99,8 +101,7 @@ async function createRealtimeClientSecret({ endpoint, apiKey, deployment, tokenU
         voice,
         voiceSpeed: 1.25,
         vadSilenceMs: 650,
-        vadThreshold: 0.55,
-        maxResponseTokens: 96
+        vadThreshold: 0.55
       })
     });
     const text = await response.text();
@@ -214,7 +215,7 @@ async function main() {
   const health = hasArg('advisor-deployment') ? {} : await deployedHealth(advisorUrl).catch(() => ({}));
   const advisorDeployment = argValue(
     'advisor-deployment',
-    health.advisorDeployment || process.env.ADVISOR_DEPLOYMENT || local.ADVISOR_DEPLOYMENT || 'gpt-5.4-nano'
+    health.advisorDeployment || process.env.ADVISOR_DEPLOYMENT || local.ADVISOR_DEPLOYMENT || 'grok-4-20-non-reasoning'
   );
   const voice = argValue('voice', process.env.REALTIME_VOICE || local.REALTIME_VOICE || 'marin');
   const audioPath = path.resolve(audioArg);
@@ -225,7 +226,7 @@ async function main() {
   const advisorIntervalMs = Number(argValue('advisor-interval-ms', '3000'));
   const advisorRetryMs = Number(argValue('advisor-retry-ms', '15000'));
   const advisorMaxRetries = Number(argValue('advisor-max-retries', '1'));
-  const advisorMaxTokens = Number(argValue('advisor-max-tokens', '1024'));
+  const advisorMaxTokens = Number(argValue('advisor-max-tokens', '2048'));
   const transcriptionDeployment = argValue('transcription-deployment', process.env.TRANSCRIPTION_DEPLOYMENT || local.TRANSCRIPTION_DEPLOYMENT || 'gpt-4o-mini-transcribe');
   const headless = boolArg('headless', true);
   const humanLog = boolArg('human-log', true);
@@ -280,7 +281,8 @@ async function main() {
     index: index + 1,
     assistantTranscript: '',
     advisor: null,
-    sawResponseDone: false
+    sawResponseDone: false,
+    responseStatus: ''
   }));
 
   const browser = await chromium.launch({
@@ -345,6 +347,7 @@ async function main() {
       const assistantDeltaByContent = new Map();
       const assistantPartsByTurn = Array.from({ length: maxChunks }, () => new Map());
       const responseDoneByTurn = Array.from({ length: maxChunks }, () => false);
+      const responseStatusByTurn = Array.from({ length: maxChunks }, () => '');
       let configured = false;
       let finished = false;
       let activeTurn = -1;
@@ -427,6 +430,7 @@ async function main() {
             type: 'realtime',
             instructions: '日本語で短く自然に返答してください。長くても2文。',
             output_modalities: ['audio'],
+            max_output_tokens: 'inf',
             audio: {
               input: {
                 format: { type: 'audio/pcm', rate: 24000 },
@@ -439,7 +443,8 @@ async function main() {
                   threshold: 0.5,
                   prefix_padding_ms: 300,
                   silence_duration_ms: 500,
-                  create_response: true
+                  create_response: true,
+                  interrupt_response: false
                 }
               },
               output: {
@@ -501,6 +506,7 @@ async function main() {
           }
           if (event.type === 'response.done' && activeTurn >= 0) {
             responseDoneByTurn[activeTurn] = true;
+            responseStatusByTurn[activeTurn] = event.response?.status || event.status || '';
             if (currentResponseDone) currentResponseDone();
           }
           if (event.type === 'error') {
@@ -570,7 +576,8 @@ async function main() {
         turns: assistantTextByTurn.map((assistantTranscript, index) => ({
           index: index + 1,
           assistantTranscript,
-          sawResponseDone: responseDoneByTurn[index]
+          sawResponseDone: responseDoneByTurn[index],
+          responseStatus: responseStatusByTurn[index]
         })),
         seen: Array.from(new Set(seen))
       };
@@ -598,7 +605,8 @@ async function main() {
         index: turn.index,
         assistantTranscript: browserResult.turns[index]?.assistantTranscript || turn.assistantTranscript,
         advisor: turn.advisor,
-        sawResponseDone: browserResult.turns[index]?.sawResponseDone || turn.sawResponseDone
+        sawResponseDone: browserResult.turns[index]?.sawResponseDone || turn.sawResponseDone,
+        responseStatus: browserResult.turns[index]?.responseStatus || turn.responseStatus
       })),
       seen: browserResult.seen
     };

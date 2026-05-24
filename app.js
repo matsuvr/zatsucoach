@@ -4,29 +4,31 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { VRButton } from 'three/addons/webxr/VRButton.js';
 import { VRMLoaderPlugin } from '@pixiv/three-vrm';
 import * as THREE_VRM from '@pixiv/three-vrm';
+import { createVRMAnimationClip, VRMAnimationLoaderPlugin, VRMLookAtQuaternionProxy } from '@pixiv/three-vrm-animation';
 
 const defaultSettings = Object.freeze({
   realtimeDeployment: 'gpt-realtime-2',
-  advisorDeployment: 'gpt-5.4-nano',
+  advisorDeployment: 'grok-4-20-non-reasoning',
   avatarTextDeployment: 'gpt-5.4-nano',
   voice: 'marin',
   voiceSpeed: 1.25,
   vadSilenceMs: 650,
   vadThreshold: 0.55,
-  maxResponseTokens: 96,
-  advisorMaxTokens: 1024,
+  advisorMaxTokens: 2048,
   reasoningEffort: 'none',
-  webrtcFilter: 'on',
-  benchmarkAdvisorDeployments: 'gpt-5.4-nano,gpt-5-nano',
-  realtimeInstructions: `あなたは企業の雑談訓練用アバターです。目的は、在宅勤務に慣れた社員がオフィスで自然に短い雑談をできるようにすることです。\n\n制約:\n- 日本語で話す。\n- 返答は原則1文、長くても2文。\n- 最初の反応は短い相づち、共感、軽い質問を優先する。\n- 相手を評価しすぎない。\n- ビジネス上の機密、医療、法律、金融の助言は避ける。\n- 会話のテンポを最優先し、考え込まない。`,
-  advisorInstructions: `あなたは会話練習のリアルタイム助言AIです。Realtimeのユーザー発話文字起こし、アバター応答、会話履歴から、直前の会話状態を推定して助言します。\n\n出力形式:\n{ "label": "good|warn|risk", "advice": "1〜3文の日本語助言", "reason": "短い理由" }\n\n評価軸:\n- ユーザー発話が会話として成立しているか。\n- ぶつ切り、未完、文脈不足に見えないか。\n- 次にユーザーが足すと自然な一言があるか。\n- 相手の話を受ける余地があるか。\n\n制約:\n- 返答はJSONのみ。\n- ユーザー発話文字起こしがない場合は、Realtimeアバター応答から推定し、断定しすぎない。\n- 速度優先。`
+  benchmarkAdvisorDeployments: 'grok-4-20-non-reasoning,gpt-5.4-nano',
+  realtimeInstructions: `あなたは雑談訓練用アバターです。目的は、在宅勤務に慣れた社員がオフィスで自然に短い雑談をできるようにすることです。\n\n制約:\n- 日本語で話す。\n- 返答は原則1文、長くても2文。\n- 最初の反応は短い相づち、共感、軽い質問を優先する。\n- 相手を評価しすぎない。\n- ビジネス上の機密、医療、法律、金融の助言は避ける。\n- 会話のテンポを最優先し、考え込まない。`,
+  advisorInstructions: `あなたは会話練習のリアルタイム助言AIです。入力JSONの speaker="user" は訓練者本人で、画面では「あなた」と表示されます。speaker="avatar" は会話相手のAIアバターで、画面では「アバター」と表示されます。アバター発話をあなた自身の返答や訓練者発話として扱わないでください。\n\n助言対象:\n- latest_user_utterance がある場合、その user 発話だけを評価する。\n- conversation_log の avatar 発話は文脈としてだけ使う。\n- latest_user_utterance が null の場合だけ、アバター応答から状況を控えめに推定し、訓練者の発話内容を断定しない。\n\n出力形式:\n{ "label": "good|warn|risk", "advice": "1〜3文の日本語助言", "reason": "短い理由" }\n\n評価軸:\n- ユーザー発話が会話として成立しているか。\n- ぶつ切り、未完、文脈不足に見えないか。\n- 次にユーザーが足すと自然な一言があるか。\n- 相手の話を受ける余地があるか。\n\n制約:\n- 返答はJSONのみ。\n- 速度優先。`
 });
 
 const ADVISOR_MIN_INTERVAL_MS = 3000;
 const ADVISOR_BACKOFF_MS = 60000;
 const ADVISOR_ERROR_MUTE_MS = 60000;
 const ADVISOR_TRANSCRIPT_GRACE_MS = 1200;
-const ASSISTANT_RESPONSE_FLUSH_MS = 700;
+const ASSISTANT_RESPONSE_FALLBACK_FLUSH_MS = 2500;
+const DIAGNOSTIC_LOG_LIMIT = 1000;
+const AVATAR_VRM_URL = './assets/QuQu_U.vrm';
+const AVATAR_VRMA_URL = './assets/relaxed_stand_idle_1s_skeleton_only.vrma';
 
 const serverSettingKeys = Object.freeze([
   'realtimeDeployment',
@@ -55,6 +57,7 @@ const els = {
   btnClearAdvice: document.getElementById('btnClearAdvice'),
   btnClearTranscript: document.getElementById('btnClearTranscript'),
   btnClearEvents: document.getElementById('btnClearEvents'),
+  btnExportEvents: document.getElementById('btnExportEvents'),
   btnResetSettings: document.getElementById('btnResetSettings'),
   textInput: document.getElementById('textInput')
 };
@@ -64,6 +67,7 @@ const state = {
   pc: null,
   dataChannel: null,
   mediaStream: null,
+  microphoneEnabled: false,
   activeRealtimeSessionId: 0,
   realtimeStarting: false,
   expectedRealtimeVoice: '',
@@ -79,6 +83,7 @@ const state = {
   assistantTextByResponse: new Map(),
   assistantResponseParts: new Map(),
   assistantResponseTimers: new Map(),
+  assistantResponseMeta: new Map(),
   processedAssistantResponseKeys: new Set(),
   processedAssistantResponses: new Set(),
   userTextByItem: new Map(),
@@ -99,7 +104,8 @@ const state = {
   lastAdvisorStartedAt: 0,
   realtimeSessionConfigured: false,
   sessionUpdateFallbackTimer: null,
-  sessionUpdateWatchdogTimer: null
+  sessionUpdateWatchdogTimer: null,
+  diagnosticEvents: []
 };
 
 const sceneState = {
@@ -107,10 +113,20 @@ const sceneState = {
   scene: null,
   camera: null,
   controls: null,
+  frontKeyLight: null,
   vrm: null,
+  animationMixer: null,
   clock: new THREE.Clock(),
-  blinkTimer: 0,
-  mouthTimer: 0
+  blinkTimer: 0.4 + Math.random() * 1.6,
+  blinkProgress: 0,
+  blinkDuration: 0.12,
+  mouthTimer: 0,
+  mouthValue: 0,
+  mouthExpressionIndex: 0,
+  audioContext: null,
+  lipSource: null,
+  lipAnalyser: null,
+  lipData: null
 };
 
 initTabs();
@@ -125,9 +141,22 @@ function loadSettings() {
   if (!raw) return { ...defaultSettings };
   try {
     const settings = { ...defaultSettings, ...JSON.parse(raw) };
-    if (Number(settings.advisorMaxTokens) < defaultSettings.advisorMaxTokens) {
+    delete settings.maxResponseTokens;
+    delete settings.webrtcFilter;
+    if (!Number.isFinite(Number(settings.advisorMaxTokens)) || Number(settings.advisorMaxTokens) < 512) {
       settings.advisorMaxTokens = defaultSettings.advisorMaxTokens;
     }
+    settings.advisorDeployment = normalizeAdvisorDeploymentSetting(settings.advisorDeployment);
+    if (settings.advisorDeployment === 'gpt-5.4-nano') settings.advisorDeployment = defaultSettings.advisorDeployment;
+    settings.benchmarkAdvisorDeployments = String(settings.benchmarkAdvisorDeployments || defaultSettings.benchmarkAdvisorDeployments)
+      .split(',')
+      .map((name) => normalizeAdvisorDeploymentSetting(name.trim()))
+      .filter(Boolean)
+      .join(',');
+    if (settings.benchmarkAdvisorDeployments === 'gpt-5.4-nano,gpt-5-nano') {
+      settings.benchmarkAdvisorDeployments = defaultSettings.benchmarkAdvisorDeployments;
+    }
+    if (Number(settings.advisorMaxTokens) <= 1024) settings.advisorMaxTokens = defaultSettings.advisorMaxTokens;
     if (Number(settings.advisorMaxTokens) > 4096) {
       settings.advisorMaxTokens = defaultSettings.advisorMaxTokens;
     }
@@ -140,8 +169,29 @@ function loadSettings() {
   }
 }
 
+function normalizeAdvisorDeploymentSetting(value) {
+  const raw = String(value || '').trim();
+  const aliases = {
+    'kimi-2.6': 'Kimi-K2.6',
+    'kimi-k2.6': 'Kimi-K2.6',
+    'kimi-k2-6': 'Kimi-K2.6',
+    'kimi-2.5': 'Kimi-K2.5',
+    'kimi-k2.5': 'Kimi-K2.5',
+    'kimi-k2-5': 'Kimi-K2.5'
+  };
+  return aliases[raw.toLowerCase()] || raw;
+}
+
 function saveSettings(next) {
   state.settings = { ...defaultSettings, ...next };
+  state.settings.advisorDeployment = normalizeAdvisorDeploymentSetting(state.settings.advisorDeployment);
+  state.settings.benchmarkAdvisorDeployments = String(state.settings.benchmarkAdvisorDeployments || '')
+    .split(',')
+    .map((name) => normalizeAdvisorDeploymentSetting(name.trim()))
+    .filter(Boolean)
+    .join(',');
+  delete state.settings.maxResponseTokens;
+  delete state.settings.webrtcFilter;
   localStorage.setItem('zatsucoach.settings.v1', JSON.stringify(state.settings));
 }
 
@@ -199,7 +249,7 @@ function initSettingsDialog() {
     const data = new FormData(els.settingsForm);
     const next = { ...state.settings };
     for (const [key, value] of data.entries()) next[key] = String(value);
-    for (const key of ['voiceSpeed', 'vadSilenceMs', 'vadThreshold', 'maxResponseTokens', 'advisorMaxTokens']) {
+    for (const key of ['voiceSpeed', 'vadSilenceMs', 'vadThreshold', 'advisorMaxTokens']) {
       next[key] = Number(next[key]);
     }
     saveSettings(next);
@@ -237,7 +287,11 @@ function wireEvents() {
     state.processedUserTranscriptKeys.clear();
     els.transcriptFeed.innerHTML = '';
   });
-  els.btnClearEvents.addEventListener('click', () => els.eventFeed.innerHTML = '');
+  els.btnClearEvents.addEventListener('click', () => {
+    state.diagnosticEvents = [];
+    els.eventFeed.innerHTML = '';
+  });
+  els.btnExportEvents.addEventListener('click', exportDiagnosticEvents);
   window.addEventListener('beforeunload', stopRealtime);
 }
 
@@ -250,6 +304,9 @@ function initScene() {
 
   const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.outputColorSpace = THREE.SRGBColorSpace;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 1.08;
   renderer.xr.enabled = true;
   els.stage.appendChild(renderer.domElement);
   els.stage.appendChild(VRButton.createButton(renderer));
@@ -260,11 +317,7 @@ function initScene() {
   controls.minDistance = 1.5;
   controls.maxDistance = 6;
 
-  const hemi = new THREE.HemisphereLight(0xffffff, 0x303850, 1.8);
-  scene.add(hemi);
-  const key = new THREE.DirectionalLight(0xffffff, 1.7);
-  key.position.set(1.7, 3.1, 2.2);
-  scene.add(key);
+  setupAvatarLighting(scene, camera);
 
   const floor = new THREE.Mesh(
     new THREE.CircleGeometry(1.65, 64),
@@ -288,7 +341,7 @@ function initScene() {
   window.addEventListener('resize', resize);
   resize();
 
-  loadVRM('./assets/AvatarSample_Y.vrm');
+  loadVRM(AVATAR_VRM_URL);
   renderer.setAnimationLoop(renderLoop);
 }
 
@@ -302,9 +355,12 @@ function loadVRM(url) {
     THREE_VRM.VRMUtils?.rotateVRM0?.(vrm);
     sceneState.scene.add(vrm.scene);
     sceneState.vrm = vrm;
+    tuneAvatarMaterials(vrm.scene);
     fitVRM(vrm);
+    addLookAtProxy(vrm);
     els.avatarStatus.textContent = 'avatar: ready';
     setAvatarMood('neutral');
+    loadVRMA(AVATAR_VRMA_URL, vrm);
   }, (progress) => {
     if (progress.total) {
       const pct = Math.round((progress.loaded / progress.total) * 100);
@@ -314,6 +370,90 @@ function loadVRM(url) {
     console.error(error);
     els.avatarStatus.textContent = 'avatar: load failed';
     addAdvice('app', `VRMの読み込みに失敗しました: ${error.message || error}`, 'risk');
+  });
+}
+
+function loadVRMA(url, vrm) {
+  els.avatarStatus.textContent = 'avatar: loading animation';
+  const loader = new GLTFLoader();
+  loader.register((parser) => new VRMAnimationLoaderPlugin(parser));
+  loader.load(url, (gltf) => {
+    const vrmAnimation = gltf.userData.vrmAnimations?.[0];
+    if (!vrmAnimation) throw new Error('VRMA not found in glTF userData.');
+    const clip = createVRMAnimationClip(vrmAnimation, vrm);
+    sceneState.animationMixer?.stopAllAction();
+    sceneState.animationMixer = new THREE.AnimationMixer(vrm.scene);
+    sceneState.animationMixer
+      .clipAction(clip)
+      .reset()
+      .setLoop(THREE.LoopRepeat, Infinity)
+      .play();
+    vrm.humanoid?.resetNormalizedPose?.();
+    els.avatarStatus.textContent = 'avatar: ready + reading loop';
+  }, (progress) => {
+    if (progress.total) {
+      const pct = Math.round((progress.loaded / progress.total) * 100);
+      els.avatarStatus.textContent = `avatar: animation ${pct}%`;
+    }
+  }, (error) => {
+    console.error(error);
+    els.avatarStatus.textContent = 'avatar: ready, animation failed';
+    addAdvice('app', `VRMAの読み込みに失敗しました: ${error.message || error}`, 'warn');
+  });
+}
+
+function addLookAtProxy(vrm) {
+  if (!vrm.lookAt || vrm.scene.getObjectByName('lookAtQuaternionProxy')) return;
+  const lookAtQuatProxy = new VRMLookAtQuaternionProxy(vrm.lookAt);
+  lookAtQuatProxy.name = 'lookAtQuaternionProxy';
+  vrm.scene.add(lookAtQuatProxy);
+}
+
+function setupAvatarLighting(scene, camera) {
+  scene.add(camera);
+
+  const hemi = new THREE.HemisphereLight(0xf7f0ff, 0x243045, 0.48);
+  scene.add(hemi);
+
+  const frontKey = new THREE.DirectionalLight(0xfff1df, 3.25);
+  frontKey.position.copy(camera.position);
+  frontKey.target.position.set(0, 1.18, 0);
+  scene.add(frontKey);
+  scene.add(frontKey.target);
+
+  const cameraFill = new THREE.PointLight(0xffe6d2, 0.95, 5, 1.25);
+  cameraFill.position.set(0, 0, 0);
+  camera.add(cameraFill);
+
+  const rim = new THREE.DirectionalLight(0xb9ccff, 0.8);
+  rim.position.set(-1.8, 2.5, -1.9);
+  rim.target.position.set(0, 1.05, 0);
+  scene.add(rim);
+  scene.add(rim.target);
+
+  sceneState.frontKeyLight = frontKey;
+}
+
+function syncCameraLighting() {
+  if (!sceneState.frontKeyLight || !sceneState.camera) return;
+  sceneState.frontKeyLight.position.copy(sceneState.camera.position);
+}
+
+function tuneAvatarMaterials(root) {
+  root.traverse((object) => {
+    if (!object.isMesh) return;
+    const materials = Array.isArray(object.material) ? object.material : [object.material];
+    for (const material of materials) {
+      if (!material) continue;
+      material.toneMapped = false;
+      if ('roughness' in material) material.roughness = Math.max(material.roughness ?? 0.85, 0.9);
+      if ('metalness' in material) material.metalness = 0;
+      if ('envMapIntensity' in material) material.envMapIntensity = Math.min(material.envMapIntensity ?? 0.2, 0.2);
+      if ('shadingShiftFactor' in material) material.shadingShiftFactor = -0.08;
+      if ('shadingToonyFactor' in material) material.shadingToonyFactor = 0.92;
+      if ('rimLightingMixFactor' in material) material.rimLightingMixFactor = 0.25;
+      material.needsUpdate = true;
+    }
   });
 }
 
@@ -333,6 +473,8 @@ function fitVRM(vrm) {
 function renderLoop() {
   const delta = sceneState.clock.getDelta();
   sceneState.controls?.update();
+  syncCameraLighting();
+  sceneState.animationMixer?.update(delta);
   animateAvatar(delta);
   sceneState.vrm?.update(delta);
   sceneState.renderer.render(sceneState.scene, sceneState.camera);
@@ -342,20 +484,66 @@ function animateAvatar(delta) {
   const vrm = sceneState.vrm;
   if (!vrm?.expressionManager) return;
 
-  sceneState.blinkTimer -= delta;
-  if (sceneState.blinkTimer <= 0) {
-    sceneState.blinkTimer = 2.5 + Math.random() * 2.8;
-    pulseExpression(['blink', 'Blink'], 1, 120);
-  }
+  animateBlink(delta);
+  animateMouth(delta);
+}
 
-  const talking = state.avatarSpeaking;
-  const target = talking ? 0.25 + Math.random() * 0.75 : 0;
-  sceneState.mouthTimer += delta;
-  if (sceneState.mouthTimer > 0.075) {
-    sceneState.mouthTimer = 0;
-    setExpressionMany(['aa', 'A'], target);
-    setExpressionMany(['ih', 'I', 'ee', 'E', 'ou', 'U', 'oh', 'O'], talking ? Math.random() * 0.25 : 0);
+function animateBlink(delta) {
+  sceneState.blinkTimer -= delta;
+  if (sceneState.blinkTimer > 0) return;
+
+  sceneState.blinkProgress += delta / sceneState.blinkDuration;
+  const blinkValue = Math.sin(Math.min(sceneState.blinkProgress, 1) * Math.PI);
+  setExpressionMany(['blink', 'Blink'], blinkValue);
+
+  if (sceneState.blinkProgress >= 1) {
+    setExpressionMany(['blink', 'Blink'], 0);
+    sceneState.blinkProgress = 0;
+    sceneState.blinkDuration = 0.1 + Math.random() * 0.07;
+    sceneState.blinkTimer = 1.8 + Math.random() * 4.2;
   }
+}
+
+function animateMouth(delta) {
+  const audioLevel = getAvatarAudioLevel();
+  const talking = state.avatarSpeaking || audioLevel > 0.02;
+  const target = talking ? Math.min(1, audioLevel * 2.8 + 0.08) : 0;
+  sceneState.mouthValue = THREE.MathUtils.lerp(sceneState.mouthValue, target, talking ? 0.55 : 0.28);
+  sceneState.mouthTimer += delta;
+  if (sceneState.mouthTimer > 0.09) {
+    sceneState.mouthTimer = 0;
+    sceneState.mouthExpressionIndex = (sceneState.mouthExpressionIndex + 1 + Math.floor(Math.random() * 2)) % 5;
+  }
+  setLipSyncExpressions(sceneState.mouthValue, sceneState.mouthExpressionIndex, talking);
+}
+
+function setLipSyncExpressions(level, expressionIndex, talking) {
+  const damped = talking ? level : 0;
+  const vowels = [
+    { names: ['aa', 'A'], value: damped },
+    { names: ['ih', 'I'], value: damped * 0.38 },
+    { names: ['ee', 'E'], value: damped * 0.34 },
+    { names: ['ou', 'U'], value: damped * 0.42 },
+    { names: ['oh', 'O'], value: damped * 0.48 }
+  ];
+  for (let i = 0; i < vowels.length; i += 1) {
+    const vowel = vowels[i];
+    setExpressionMany(vowel.names, i === expressionIndex ? vowel.value : Math.min(vowel.value * 0.18, 0.16));
+  }
+}
+
+function getAvatarAudioLevel() {
+  const analyser = sceneState.lipAnalyser;
+  const data = sceneState.lipData;
+  if (!analyser || !data) return state.avatarSpeaking ? 0.18 + Math.random() * 0.18 : 0;
+  analyser.getByteTimeDomainData(data);
+  let sum = 0;
+  for (const value of data) {
+    const centered = (value - 128) / 128;
+    sum += centered * centered;
+  }
+  const rms = Math.sqrt(sum / data.length);
+  return Number.isFinite(rms) ? rms : 0;
 }
 
 function setAvatarMood(mood) {
@@ -384,9 +572,45 @@ function setExpression(name, value) {
   }
 }
 
-function pulseExpression(names, value, durationMs) {
-  setExpressionMany(names, value);
-  setTimeout(() => setExpressionMany(names, 0), durationMs);
+function attachLipSyncAudioStream(stream) {
+  try {
+    if (!ensureLipSyncAudioContext()) return;
+    sceneState.lipSource?.disconnect?.();
+    sceneState.lipAnalyser = sceneState.audioContext.createAnalyser();
+    sceneState.lipAnalyser.fftSize = 512;
+    sceneState.lipAnalyser.smoothingTimeConstant = 0.38;
+    sceneState.lipData = new Uint8Array(sceneState.lipAnalyser.fftSize);
+    sceneState.lipSource = sceneState.audioContext.createMediaStreamSource(stream);
+    sceneState.lipSource.connect(sceneState.lipAnalyser);
+  } catch (error) {
+    console.warn('Lip sync analyser setup failed', error);
+    sceneState.lipSource = null;
+    sceneState.lipAnalyser = null;
+    sceneState.lipData = null;
+  }
+}
+
+function ensureLipSyncAudioContext() {
+  if (!sceneState.audioContext) {
+    const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextCtor) return null;
+    sceneState.audioContext = new AudioContextCtor();
+  }
+  sceneState.audioContext.resume?.();
+  return sceneState.audioContext;
+}
+
+function resetLipSyncAudio() {
+  try {
+    sceneState.lipSource?.disconnect?.();
+  } catch {
+    // Ignore disconnect races during WebRTC teardown.
+  }
+  sceneState.lipSource = null;
+  sceneState.lipAnalyser = null;
+  sceneState.lipData = null;
+  sceneState.mouthValue = 0;
+  setLipSyncExpressions(0, sceneState.mouthExpressionIndex, false);
 }
 
 async function startRealtime() {
@@ -400,6 +624,7 @@ async function startRealtime() {
   state.realtimeStarting = true;
   state.expectedRealtimeVoice = String(state.settings.voice || '').trim().toLowerCase();
   state.clientSessionUpdateRequired = false;
+  ensureLipSyncAudioContext();
 
   try {
     setConnectionStatus('requesting token');
@@ -410,8 +635,7 @@ async function startRealtime() {
       voice: state.expectedRealtimeVoice,
       voiceSpeed: Number(state.settings.voiceSpeed),
       vadSilenceMs: Number(state.settings.vadSilenceMs),
-      vadThreshold: Number(state.settings.vadThreshold),
-      maxResponseTokens: Number(state.settings.maxResponseTokens)
+      vadThreshold: Number(state.settings.vadThreshold)
     };
     state.realtimeCounters.tokenRequests += 1;
     logEvent({
@@ -453,6 +677,7 @@ async function startRealtime() {
       if (!isActiveRealtimeSession(sessionId)) return;
       if (event.streams?.[0]) {
         els.remoteAudio.srcObject = event.streams[0];
+        attachLipSyncAudioStream(event.streams[0]);
       }
     };
     pc.onconnectionstatechange = () => {
@@ -479,7 +704,6 @@ async function startRealtime() {
     await pc.setLocalDescription(offer);
 
     const url = new URL(tokenData.webrtcUrl);
-    if (state.settings.webrtcFilter === 'on') url.searchParams.set('webrtcfilter', 'on');
 
     setConnectionStatus('sdp exchange');
     const sdpStarted = performance.now();
@@ -489,7 +713,9 @@ async function startRealtime() {
       sessionId,
       count: state.realtimeCounters.sdpExchanges,
       deployment: tokenData.deployment,
-      voice: tokenData.voice || state.expectedRealtimeVoice
+      voice: tokenData.voice || state.expectedRealtimeVoice,
+      eventStream: 'full',
+      configMode: tokenData.configMode || 'unknown'
     });
     const sdpResponse = await fetch(url.toString(), {
       method: 'POST',
@@ -523,10 +749,12 @@ function wireDataChannel(dc, sessionId, tokenData) {
     if (!isActiveRealtimeSession(sessionId)) return;
     setConnectionStatus('configuring session');
     addAdvice('app', 'Realtime接続を確立しました。サーバー側で固定した音声設定を確認しています。', 'good');
+    scheduleRealtimeSessionWatchdog(sessionId);
     if (tokenData.requiresClientSessionUpdate) {
       sendClientSessionUpdate(dc, sessionId, tokenData.sessionConfig);
+    } else {
+      confirmRealtimeSession({ session: tokenData.session }, sessionId, 'client_secret_session');
     }
-    scheduleRealtimeSessionWatchdog(sessionId);
     logEvent({ type: 'client.data_channel_open', sessionId, configMode: tokenData.configMode || 'unknown' });
   });
   dc.addEventListener('close', () => {
@@ -622,8 +850,12 @@ function handleRealtimeEvent(event, sessionId) {
       break;
     case 'output_audio_buffer.started':
       state.avatarSpeaking = true;
+      setMicrophoneTracksEnabled(false, 'avatar_speaking');
       setAvatarMood('speaking');
       setConnectionStatus('avatar speaking');
+      updateAssistantResponseMeta(event.response_id, {
+        outputAudioStartedAt: performance.now()
+      });
       if (state.lastSpeechStoppedAt) {
         const ms = Math.round(performance.now() - state.lastSpeechStoppedAt);
         state.latencySamples.push(ms);
@@ -633,8 +865,13 @@ function handleRealtimeEvent(event, sessionId) {
       break;
     case 'output_audio_buffer.stopped':
       state.avatarSpeaking = false;
+      setMicrophoneTracksEnabled(true, 'avatar_finished');
       setAvatarMood('neutral');
       setConnectionStatus('connected');
+      updateAssistantResponseMeta(event.response_id, {
+        outputAudioStoppedAt: performance.now()
+      });
+      if (event.response_id) scheduleAssistantResponseFlush(event.response_id, sessionId, 300, 'output_audio_buffer_stopped');
       break;
     case 'response.output_audio_transcript.delta':
     case 'response.audio_transcript.delta':
@@ -664,13 +901,15 @@ function handleRealtimeEvent(event, sessionId) {
       state.assistantTextByResponse.delete(contentKey);
       if (text) {
         recordAssistantResponsePart(event, contentKey, text);
-        scheduleAssistantResponseFlush(event.response_id || contentKey, sessionId, ASSISTANT_RESPONSE_FLUSH_MS);
+        scheduleAssistantResponseFlush(event.response_id || contentKey, sessionId, ASSISTANT_RESPONSE_FALLBACK_FLUSH_MS, 'transcript_done_fallback');
       }
       state.currentAssistantText = '';
       break;
     }
     case 'response.done':
+      updateAssistantResponseMeta(event.response?.id || event.response_id, responseMetaFromDoneEvent(event));
       state.avatarSpeaking = false;
+      setMicrophoneTracksEnabled(true, 'response_done');
       setAvatarMood('neutral');
       flushAssistantResponse(event.response?.id || event.response_id, sessionId, 'response_done');
       break;
@@ -694,7 +933,7 @@ function confirmRealtimeSession(event, sessionId, source) {
     return;
   }
 
-  const voice = event.session?.audio?.output?.voice || null;
+  const voice = event.session?.audio?.output?.voice || event.session?.voice || null;
   if (voice && state.expectedRealtimeVoice && voice !== state.expectedRealtimeVoice) {
     logEvent({
       type: 'client.realtime_voice_mismatch',
@@ -801,11 +1040,29 @@ function recordAssistantResponsePart(event, contentKey, text) {
   state.assistantResponseParts.set(responseId, parts);
 }
 
-function scheduleAssistantResponseFlush(responseId, sessionId, delayMs) {
+function updateAssistantResponseMeta(responseId, patch) {
+  if (!responseId) return;
+  state.assistantResponseMeta.set(responseId, {
+    ...(state.assistantResponseMeta.get(responseId) || {}),
+    ...patch
+  });
+}
+
+function responseMetaFromDoneEvent(event) {
+  const response = event.response || {};
+  return {
+    status: response.status || event.status || '',
+    statusDetails: response.status_details || event.status_details || null,
+    usage: response.usage || event.usage || null,
+    responseDoneAt: performance.now()
+  };
+}
+
+function scheduleAssistantResponseFlush(responseId, sessionId, delayMs, reason = 'flush_timeout') {
   if (!responseId) return;
   clearTimeout(state.assistantResponseTimers.get(responseId));
   state.assistantResponseTimers.set(responseId, setTimeout(() => {
-    flushAssistantResponse(responseId, sessionId, 'transcript_done_timeout');
+    flushAssistantResponse(responseId, sessionId, reason);
   }, delayMs));
 }
 
@@ -821,6 +1078,8 @@ function flushAssistantResponse(responseId, sessionId, reason) {
   if (state.processedAssistantResponses.size > 80) {
     state.processedAssistantResponses = new Set(Array.from(state.processedAssistantResponses).slice(-40));
   }
+  const meta = state.assistantResponseMeta.get(responseId) || {};
+  state.assistantResponseMeta.delete(responseId);
 
   const text = Array.from(parts.values())
     .sort((a, b) => a.outputIndex - b.outputIndex || a.contentIndex - b.contentIndex || a.itemId.localeCompare(b.itemId))
@@ -830,20 +1089,69 @@ function flushAssistantResponse(responseId, sessionId, reason) {
     .trim();
 
   if (!text) return;
-  addTranscript('assistant', text);
-  logEvent({ type: 'client.assistant_response_flushed', sessionId, responseId, reason, parts: parts.size, textChars: text.length });
-  scheduleAdvisorFromRealtimeResponse(sessionId, responseId, text);
+  const incompleteReason = assistantIncompleteReason(meta);
+  if (!incompleteReason) {
+    addTranscript('assistant', text, { sourceId: responseId });
+  }
+  logEvent({
+    type: 'client.assistant_response_flushed',
+    sessionId,
+    responseId,
+    reason,
+    status: meta.status || 'unknown',
+    statusDetails: summarizeStatusDetails(meta.statusDetails),
+    usage: summarizeUsage(meta.usage),
+    incompleteReason,
+    parts: parts.size,
+    textChars: text.length
+  });
+  if (incompleteReason) {
+    addMetric(`Realtime incomplete response: ${incompleteReason}`);
+    return;
+  }
+  scheduleAdvisorFromRealtimeResponse(sessionId, responseId, text, { incompleteReason });
 }
 
-function scheduleAdvisorFromRealtimeResponse(sessionId, responseId, assistantText) {
+function assistantIncompleteReason(meta) {
+  const status = String(meta?.status || '').toLowerCase();
+  const details = meta?.statusDetails || {};
+  const reason = String(details.reason || details.type || details.code || '').toLowerCase();
+  if (status === 'incomplete' || status === 'cancelled' || status === 'failed') return reason || status;
+  if (reason.includes('max') && reason.includes('token')) return reason;
+  if (reason.includes('interrupt') || reason.includes('turn_detected')) return reason;
+  return '';
+}
+
+function summarizeStatusDetails(details) {
+  if (!details || typeof details !== 'object') return details || null;
+  return {
+    type: details.type || null,
+    reason: details.reason || null,
+    code: details.error?.code || details.code || null,
+    message: details.error?.message || details.message || null
+  };
+}
+
+function summarizeUsage(usage) {
+  if (!usage || typeof usage !== 'object') return null;
+  return {
+    total_tokens: usage.total_tokens ?? null,
+    input_tokens: usage.input_tokens ?? null,
+    output_tokens: usage.output_tokens ?? null
+  };
+}
+
+function scheduleAdvisorFromRealtimeResponse(sessionId, responseId, assistantText, diagnostics = {}) {
   const speechStoppedAt = state.lastSpeechStoppedAt;
   setTimeout(() => {
     if (!isActiveRealtimeSession(sessionId)) return;
     const latestUser = latestTranscriptByRole('user', speechStoppedAt);
     if (latestUser) {
-      requestAdvisor('user', latestUser.text, { sessionId, source: 'realtime_user_transcript', responseId });
+      requestAdvisor('user', latestUser.text, { sessionId, source: 'realtime_user_transcript', responseId, diagnostics });
+    } else if (diagnostics.incompleteReason) {
+      logEvent({ type: 'client.advisor_skipped', sessionId, reason: 'incomplete_assistant_response', responseId, incompleteReason: diagnostics.incompleteReason });
     } else {
-      requestAdvisor('assistant', `Realtimeアバター応答: ${assistantText}`, { sessionId, source: 'realtime_response_transcript', responseId });
+      requestAdvisor('assistant', `Realtimeアバター応答: ${assistantText}`, { sessionId, source: 'realtime_response_transcript', responseId, diagnostics });
     }
   }, ADVISOR_TRANSCRIPT_GRACE_MS);
 }
@@ -857,11 +1165,17 @@ function latestTranscriptByRole(role, minPerfAt = 0) {
   return null;
 }
 
-function enableMicrophoneTracks(sessionId = state.activeRealtimeSessionId) {
+function setMicrophoneTracksEnabled(enabled, reason = 'manual', sessionId = state.activeRealtimeSessionId) {
   if (!isActiveRealtimeSession(sessionId)) return;
+  state.microphoneEnabled = Boolean(enabled);
   state.mediaStream?.getAudioTracks().forEach((track) => {
-    track.enabled = true;
+    track.enabled = Boolean(enabled);
   });
+  logEvent({ type: 'client.microphone_tracks_set', sessionId, enabled: Boolean(enabled), reason });
+}
+
+function enableMicrophoneTracks(sessionId = state.activeRealtimeSessionId) {
+  setMicrophoneTracksEnabled(true, 'session_configured', sessionId);
 }
 
 function formatApiError(data, fallback) {
@@ -899,6 +1213,7 @@ async function stopRealtime(showMessage = true, sessionId = state.activeRealtime
       els.remoteAudio.srcObject.getTracks?.().forEach((track) => track.stop());
       els.remoteAudio.srcObject = null;
     }
+    resetLipSyncAudio();
   } catch (error) {
     console.warn(error);
   }
@@ -914,6 +1229,7 @@ async function stopRealtime(showMessage = true, sessionId = state.activeRealtime
   for (const timer of state.assistantResponseTimers.values()) clearTimeout(timer);
   state.assistantResponseTimers.clear();
   state.assistantResponseParts.clear();
+  state.assistantResponseMeta.clear();
   state.processedAssistantResponseKeys.clear();
   state.processedAssistantResponses.clear();
   state.userTextByItem.clear();
@@ -971,7 +1287,6 @@ async function sendText() {
         deployment: state.settings.avatarTextDeployment || state.settings.advisorDeployment,
         transcript: state.transcript,
         instructions: state.settings.realtimeInstructions,
-        maxTokens: state.settings.maxResponseTokens,
         reasoningEffort: state.settings.reasoningEffort
       })
     });
@@ -1052,10 +1367,8 @@ async function requestAdvisor(role, latestText, meta = {}) {
   }
   const now = performance.now();
   if (now < state.advisorBackoffUntil) {
-    state.queuedAdvice = { role, latestText, meta };
     const waitMs = Math.ceil(state.advisorBackoffUntil - now);
-    logEvent({ type: 'client.advisor_deferred', reason: 'backoff', waitMs });
-    scheduleQueuedAdvisor(waitMs);
+    logEvent({ type: 'client.advisor_skipped', reason: 'backoff', waitMs });
     return;
   }
   if (state.advisorInFlight || now - state.lastAdvisorStartedAt < ADVISOR_MIN_INTERVAL_MS) {
@@ -1069,6 +1382,7 @@ async function requestAdvisor(role, latestText, meta = {}) {
   }
 
   const id = ++state.adviceCounter;
+  const clientRequestId = `advisor-${Date.now().toString(36)}-${id}`;
   const started = performance.now();
   state.advisorInFlight = true;
   state.lastAdvisorStartedAt = started;
@@ -1079,7 +1393,12 @@ async function requestAdvisor(role, latestText, meta = {}) {
     count: state.realtimeCounters.advisorRequests,
     sessionId: meta.sessionId || null,
     source: meta.source || 'manual',
-    deployment: state.settings.advisorDeployment
+    responseId: meta.responseId || null,
+    clientRequestId,
+    deployment: state.settings.advisorDeployment,
+    latestChars: String(latestText || '').length,
+    transcriptItems: state.transcript.length,
+    maxTokens: state.settings.advisorMaxTokens
   });
   try {
     const response = await fetch('/api/advisor', {
@@ -1091,7 +1410,12 @@ async function requestAdvisor(role, latestText, meta = {}) {
         reasoningEffort: state.settings.reasoningEffort,
         maxTokens: state.settings.advisorMaxTokens,
         latest: { role, text: latestText },
-        transcript: state.transcript
+        transcript: state.transcript,
+        clientRequestId,
+        sessionId: meta.sessionId || null,
+        source: meta.source || 'manual',
+        responseId: meta.responseId || null,
+        diagnostics: meta.diagnostics || {}
       })
     });
     if (meta.sessionId && !isActiveRealtimeSession(meta.sessionId)) {
@@ -1101,15 +1425,34 @@ async function requestAdvisor(role, latestText, meta = {}) {
     const data = await safeJson(response);
     if (!response.ok) {
       const message = formatAdvisorError(data, response.status);
-      logEvent({ type: 'client.advisor_error', status: response.status, error: data.error || response.statusText, attempts: data.attempts || [] });
-      if (response.status === 429) {
+      logEvent({
+        type: 'client.advisor_error',
+        id,
+        sessionId: meta.sessionId || null,
+        responseId: meta.responseId || null,
+        clientRequestId,
+        status: response.status,
+        error: data.error || response.statusText,
+        endpoint: data.endpoint || null,
+        responseHeaders: data.responseHeaders || null,
+        serviceResponseText: data.serviceResponseText || null,
+        serviceResponseBody: data.serviceResponseBody || null,
+        retryAfterMs: data.retryAfterMs || 0,
+        rateLimits: data.rateLimits || null,
+        requestIds: data.requestIds || null,
+        attempts: data.attempts || [],
+        response: data
+      });
+      if (response.status === 429 || isAdvisorUnavailable(data)) {
         const serverRetryMs = Number(data.retryAfterMs) || 0;
         const attemptRetryMs = Math.max(0, ...(data.attempts || []).map((attempt) => Number(attempt.retryAfterMs) || 0));
-        const backoffMs = Math.max(ADVISOR_BACKOFF_MS, serverRetryMs, attemptRetryMs);
+        const backoffMs = response.status === 429
+          ? Math.max(ADVISOR_BACKOFF_MS, serverRetryMs, attemptRetryMs)
+          : ADVISOR_BACKOFF_MS * 10;
         state.advisorBackoffUntil = performance.now() + backoffMs;
         state.advisorErrorMutedUntil = performance.now() + ADVISOR_ERROR_MUTE_MS;
         state.queuedAdvice = null;
-        addAdvice('app', `Advisorが429を返したため、約${Math.ceil(backoffMs / 1000)}秒間LLM助言を停止します。即時助言だけ継続します。`, 'warn');
+        addMetric(`Advisor skipped: ${response.status} / backoff=${Math.ceil(backoffMs / 1000)}s / ${state.settings.advisorDeployment}`);
         return;
       }
       throw new Error(message);
@@ -1119,13 +1462,35 @@ async function requestAdvisor(role, latestText, meta = {}) {
     const text = data.advice ? `${data.advice}${data.reason ? `\n理由: ${data.reason}` : ''}` : (data.text || '(no advice)');
     addAdvice(`LLM #${id}`, text, label, `${ms}ms / ${data.deployment || state.settings.advisorDeployment}`);
     addMetric(`Advisor: ${ms}ms / ${data.deployment || state.settings.advisorDeployment}`);
+    logEvent({
+      type: 'client.advisor_result',
+      id,
+      sessionId: meta.sessionId || null,
+      responseId: meta.responseId || null,
+      clientRequestId,
+      latencyMs: ms,
+      endpoint: data.endpoint || null,
+      inputBudget: data.inputBudget || null,
+      responseHeaders: data.responseHeaders || null,
+      rateLimits: data.rateLimits || null
+    });
+    const rateLimitWaitMs = advisorRateLimitDelayMs(data.rateLimits);
+    if (rateLimitWaitMs > ADVISOR_MIN_INTERVAL_MS) {
+      state.advisorBackoffUntil = Math.max(state.advisorBackoffUntil, performance.now() + rateLimitWaitMs);
+      logEvent({
+        type: 'client.advisor_rate_limit_wait',
+        reason: 'remaining_requests_exhausted',
+        waitMs: Math.ceil(rateLimitWaitMs),
+        rateLimits: data.rateLimits || null
+      });
+    }
   } catch (error) {
     if (meta.sessionId && !isActiveRealtimeSession(meta.sessionId)) {
       logEvent({ type: 'client.advisor_error_ignored', reason: 'stale_session', sessionId: meta.sessionId, id });
       return;
     }
     if (performance.now() >= state.advisorErrorMutedUntil) {
-      addAdvice(`LLM #${id}`, `助言生成に失敗しました: ${error.message || error}`, 'risk');
+      addAdvice(`LLM #${id}`, error.message || String(error), 'risk');
     }
   } finally {
     state.advisorInFlight = false;
@@ -1151,21 +1516,42 @@ function runQueuedAdvisor() {
   requestAdvisor(next.role, next.latestText, next.meta || {});
 }
 
+function advisorRateLimitDelayMs(rateLimits) {
+  if (!rateLimits || typeof rateLimits !== 'object') return 0;
+  const remainingRequests = Number(rateLimits['x-ratelimit-remaining-requests']);
+  if (!Number.isFinite(remainingRequests) || remainingRequests > 0) return 0;
+
+  const retryAfterMs = Number(rateLimits['retry-after-ms']);
+  const retryAfterSeconds = Number(rateLimits['retry-after']);
+  const resetRequestsSeconds = Number(rateLimits['x-ratelimit-reset-requests']);
+  const candidates = [
+    Number.isFinite(retryAfterMs) ? retryAfterMs : 0,
+    Number.isFinite(retryAfterSeconds) ? retryAfterSeconds * 1000 : 0,
+    Number.isFinite(resetRequestsSeconds) ? resetRequestsSeconds * 1000 : 0
+  ].filter((value) => value > 0);
+  if (!candidates.length) return 0;
+  return Math.min(Math.max(...candidates), ADVISOR_BACKOFF_MS * 2);
+}
+
+function isAdvisorUnavailable(data) {
+  const code = String(data?.serviceResponseBody?.error?.code || data?.azureError?.code || data?.code || '').toLowerCase();
+  const message = String(data?.serviceResponseText || data?.error || '').toLowerCase();
+  return code.includes('unavailable_model') || message.includes('unavailable model');
+}
+
 function formatAdvisorError(data, status) {
-  const lines = [data.error || `advisor failed: ${status}`];
-  if (Array.isArray(data.attempts) && data.attempts.length) {
-    lines.push('試行詳細:');
-    for (const attempt of data.attempts) {
-      const params = attempt.request?.parameters || {};
-      const tokenParam = Object.prototype.hasOwnProperty.call(params, 'max_completion_tokens')
-        ? `max_completion_tokens=${params.max_completion_tokens}`
-        : `max_tokens=${params.max_tokens}`;
-      const reasoning = Object.prototype.hasOwnProperty.call(params, 'reasoning_effort')
-        ? `, reasoning_effort=${params.reasoning_effort}`
-        : '';
-      lines.push(`- ${attempt.name}: HTTP ${attempt.status}, ${tokenParam}${reasoning}, ${attempt.message}`);
-    }
-  }
+  const lines = [];
+  if (data.serviceResponseText) lines.push(data.serviceResponseText);
+  else if (data.error) lines.push(data.error);
+  else lines.push(`HTTP ${status}`);
+
+  const raw = {
+    endpoint: data.endpoint || null,
+    responseHeaders: data.responseHeaders || null,
+    serviceResponseBody: data.serviceResponseBody || null,
+    attempts: data.attempts || []
+  };
+  lines.push(JSON.stringify(raw, null, 2));
   return lines.join('\n');
 }
 
@@ -1246,9 +1632,16 @@ function addMetric(text) {
 }
 
 function logEvent(event) {
+  const compact = compactEvent(event);
+  state.diagnosticEvents.push({
+    at: new Date().toISOString(),
+    perfAt: Math.round(performance.now()),
+    sessionId: event.sessionId ?? state.activeRealtimeSessionId ?? null,
+    ...compact
+  });
+  if (state.diagnosticEvents.length > DIAGNOSTIC_LOG_LIMIT) state.diagnosticEvents.shift();
   const card = document.createElement('div');
   card.className = 'card';
-  const compact = compactEvent(event);
   card.innerHTML = `<div class="meta"><span>${escapeHtml(event.type || 'event')}</span><span>${new Date().toLocaleTimeString('ja-JP', { hour12: false })}</span></div><div class="body">${escapeHtml(JSON.stringify(compact, null, 2))}</div>`;
   els.eventFeed.appendChild(card);
   if (els.eventFeed.children.length > 120) els.eventFeed.removeChild(els.eventFeed.firstChild);
@@ -1257,9 +1650,29 @@ function logEvent(event) {
 
 function compactEvent(event) {
   const clone = { ...event };
+  delete clone.token;
+  delete clone.client_secret;
+  delete clone.apiKey;
+  delete clone.Authorization;
+  if (typeof clone.instructions === 'string') clone.instructions = `[${clone.instructions.length} chars]`;
+  if (clone.session?.instructions) clone.session = { ...clone.session, instructions: `[${clone.session.instructions.length} chars]` };
+  if (clone.request?.messages) clone.request = { ...clone.request, messages: `[${clone.request.messages.length} messages]` };
   if (typeof clone.delta === 'string' && clone.delta.length > 120) clone.delta = `${clone.delta.slice(0, 120)}…`;
   if (typeof clone.transcript === 'string' && clone.transcript.length > 160) clone.transcript = `${clone.transcript.slice(0, 160)}…`;
   return clone;
+}
+
+function exportDiagnosticEvents() {
+  const lines = state.diagnosticEvents.map((event) => JSON.stringify(event));
+  const blob = new Blob([`${lines.join('\n')}\n`], { type: 'application/x-ndjson' });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = `zatsucoach-realtime-${new Date().toISOString().replace(/[:.]/g, '-')}.jsonl`;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
 }
 
 function setConnectionStatus(text) {

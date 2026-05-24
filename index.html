@@ -4,13 +4,15 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>ZatsuCoach MVP</title>
+  <link rel="icon" href="data:," />
   <link rel="stylesheet" href="./styles.css" />
   <script type="importmap">
     {
       "imports": {
         "three": "https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js",
         "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/",
-        "@pixiv/three-vrm": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm@3/lib/three-vrm.module.min.js"
+        "@pixiv/three-vrm": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm@3/lib/three-vrm.module.min.js",
+        "@pixiv/three-vrm-animation": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm-animation@3/lib/three-vrm-animation.module.min.js"
       }
     }
   </script>
@@ -79,7 +81,10 @@
       <div id="eventsTab" class="tabBody">
         <div class="panelHeader">
           <h2>Realtime events</h2>
-          <button id="btnClearEvents" class="secondary small">クリア</button>
+          <div class="buttonGroup">
+            <button id="btnExportEvents" class="secondary small">JSONL保存</button>
+            <button id="btnClearEvents" class="secondary small">クリア</button>
+          </div>
         </div>
         <div id="eventFeed" class="feed compact mono"></div>
       </div>
@@ -134,12 +139,8 @@
           <input name="vadThreshold" type="number" min="0.05" max="0.95" step="0.05" />
         </label>
         <label>
-          Max response tokens
-          <input name="maxResponseTokens" type="number" min="16" max="512" step="8" />
-        </label>
-        <label>
           Advisor max tokens
-          <input name="advisorMaxTokens" type="number" min="32" max="4096" step="64" />
+          <input name="advisorMaxTokens" type="number" min="512" max="4096" step="256" />
         </label>
         <label>
           Advisor reasoning effort
@@ -149,13 +150,6 @@
             <option value="minimal">minimal</option>
             <option value="low">low</option>
             <option value="medium">medium</option>
-          </select>
-        </label>
-        <label>
-          WebRTC filter
-          <select name="webrtcFilter">
-            <option value="on">on</option>
-            <option value="off">off</option>
           </select>
         </label>
       </div>
