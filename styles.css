@@ -91,12 +91,12 @@ button.small { padding: 0.35rem 0.55rem; font-size: 0.86rem; }
 .stageTranscriptBubble {
   position: relative;
   width: fit-content;
-  max-width: min(38%, 290px);
+  max-width: min(62%, 520px);
   min-width: 5.25rem;
   border-radius: 0.78rem;
   padding: 0.7rem 0.85rem;
   color: #12161f;
-  font-size: clamp(0.78rem, 1.7vw, 1rem);
+  font-size: 0.94rem;
   line-height: 1.38;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
@@ -249,7 +249,7 @@ code { color: #a5d6ff; }
   .layout { grid-template-columns: 1fr; height: auto; }
   .stage { min-height: 58vh; }
   .stageOverlay { padding: 0.75rem 0.8rem 1rem; }
-  .stageTranscriptBubble { max-width: min(44%, 240px); }
+  .stageTranscriptBubble { max-width: min(86%, 520px); }
   .stageAdviceOverlay { width: min(88%, 520px); }
   .coachPanel { min-height: 70vh; }
   .topbar { align-items: flex-start; flex-direction: column; }

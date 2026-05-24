@@ -144,6 +144,18 @@
           <input name="vadThreshold" type="number" min="0.05" max="0.95" step="0.05" />
         </label>
         <label>
+          Noise gate ms
+          <input name="vadMinSpeechMs" type="number" min="0" max="2000" step="10" />
+        </label>
+        <label>
+          Noise reduction
+          <select name="noiseReduction">
+            <option value="far_field">far_field</option>
+            <option value="near_field">near_field</option>
+            <option value="off">off</option>
+          </select>
+        </label>
+        <label>
           Advisor max tokens
           <input name="advisorMaxTokens" type="number" min="512" max="4096" step="256" />
         </label>

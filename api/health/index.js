@@ -28,7 +28,7 @@ module.exports = async function (context) {
       hasAdvisorApiKey: Boolean(advisorApiKey()),
       avatarTextDeployment: process.env.AVATAR_TEXT_DEPLOYMENT || null,
       transcribeDiagnosticEnabled: String(process.env.ENABLE_TRANSCRIBE_DIAGNOSTIC || '').toLowerCase() === 'true',
-      codeVersion: '2026-05-24-realtime-no-barge-in-openai-v1-advisor',
+      codeVersion: '2026-05-24-realtime-manual-vad-noise-gate',
       node: process.version
     });
   } catch (error) {

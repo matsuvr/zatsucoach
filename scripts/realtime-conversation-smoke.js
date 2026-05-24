@@ -433,6 +433,7 @@ async function main() {
             max_output_tokens: 'inf',
             audio: {
               input: {
+                noise_reduction: { type: 'far_field' },
                 format: { type: 'audio/pcm', rate: 24000 },
                 transcription: {
                   model: transcriptionDeployment,
@@ -443,7 +444,7 @@ async function main() {
                   threshold: 0.5,
                   prefix_padding_ms: 300,
                   silence_duration_ms: 500,
-                  create_response: true,
+                  create_response: false,
                   interrupt_response: false
                 }
               },
@@ -480,6 +481,9 @@ async function main() {
 
           if (event.type === 'session.created') sendSessionUpdate();
           if (event.type === 'session.updated') configured = true;
+          if (event.type === 'input_audio_buffer.speech_stopped' && activeTurn >= 0 && dc?.readyState === 'open') {
+            dc.send(JSON.stringify({ type: 'response.create' }));
+          }
 
           if ((event.type === 'conversation.item.input_audio_transcription.delta' || event.type === 'conversation.item.audio_transcription.delta') && activeTurn >= 0) {
             userTextByTurn[activeTurn] += event.delta || '';

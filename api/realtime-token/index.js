@@ -23,6 +23,8 @@ const ALLOWED_VOICES = new Set([
   'verse'
 ]);
 
+const ALLOWED_NOISE_REDUCTION = new Set(['far_field', 'near_field', 'off']);
+
 function safeVoice(value, fallback = 'marin') {
   const voice = String(value || fallback).trim().toLowerCase();
   if (!ALLOWED_VOICES.has(voice)) {
@@ -31,13 +33,22 @@ function safeVoice(value, fallback = 'marin') {
   return voice;
 }
 
+function safeNoiseReduction(value, fallback = 'far_field') {
+  const mode = String(value || fallback).trim().toLowerCase();
+  if (!ALLOWED_NOISE_REDUCTION.has(mode)) {
+    throw new Error(`unsupported realtime noise reduction: ${mode}`);
+  }
+  return mode;
+}
+
 function buildRealtimeSession(body, deployment) {
   const voice = safeVoice(body.voice, process.env.REALTIME_VOICE || 'marin');
+  const noiseReduction = safeNoiseReduction(body.noiseReduction, process.env.REALTIME_NOISE_REDUCTION || 'far_field');
   const transcriptionDeployment = safeDeployment(
     body.transcriptionDeployment,
     process.env.TRANSCRIPTION_DEPLOYMENT || 'gpt-4o-mini-transcribe'
   );
-  const vadThreshold = clampNumber(body.vadThreshold, 0.55, 0.05, 0.95);
+  const vadThreshold = clampNumber(body.vadThreshold, 0.65, 0.05, 0.95);
   const vadSilenceMs = clampNumber(body.vadSilenceMs, 650, 120, 1200);
   const instructions = String(body.instructions || process.env.REALTIME_INSTRUCTIONS || '').slice(0, 12000);
 
@@ -49,6 +60,7 @@ function buildRealtimeSession(body, deployment) {
     max_output_tokens: 'inf',
     audio: {
       input: {
+        noise_reduction: noiseReduction === 'off' ? null : { type: noiseReduction },
         format: {
           type: 'audio/pcm',
           rate: 24000
@@ -62,7 +74,7 @@ function buildRealtimeSession(body, deployment) {
           threshold: vadThreshold,
           prefix_padding_ms: 300,
           silence_duration_ms: vadSilenceMs,
-          create_response: true,
+          create_response: false,
           interrupt_response: false
         }
       },
@@ -138,6 +150,7 @@ module.exports = async function (context, req) {
           model: session.audio.input.transcription.model,
           language: session.audio.input.transcription.language
         },
+        noise_reduction: session.audio.input.noise_reduction,
         voice: session.audio.output.voice
       }
     });

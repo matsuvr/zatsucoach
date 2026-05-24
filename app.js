@@ -13,7 +13,9 @@ const defaultSettings = Object.freeze({
   voice: 'marin',
   voiceSpeed: 1.25,
   vadSilenceMs: 650,
-  vadThreshold: 0.55,
+  vadThreshold: 0.65,
+  vadMinSpeechMs: 450,
+  noiseReduction: 'far_field',
   advisorMaxTokens: 2048,
   reasoningEffort: 'none',
   benchmarkAdvisorDeployments: 'grok-4-20-non-reasoning,gpt-5.4-nano',
@@ -26,9 +28,11 @@ const ADVISOR_BACKOFF_MS = 60000;
 const ADVISOR_ERROR_MUTE_MS = 60000;
 const ADVISOR_TRANSCRIPT_GRACE_MS = 1200;
 const ASSISTANT_RESPONSE_FALLBACK_FLUSH_MS = 2500;
+const AVATAR_AUDIO_RELEASE_DELAY_MS = 800;
+const VAD_PREFIX_PADDING_MS = 300;
+const USER_TURN_TRANSCRIPT_WAIT_MS = 800;
 const DIAGNOSTIC_LOG_LIMIT = 1000;
 const STAGE_TRANSCRIPT_LIMIT = 4;
-const STAGE_BUBBLE_TEXT_LIMIT = 86;
 const STAGE_ADVICE_TEXT_LIMIT = 96;
 const AVATAR_VRM_URL = './assets/8590256991748008892.vrm';
 const AVATAR_VRMA_URL = './assets/relaxed_stand_idle_1s_skeleton_only_human_breath.vrma';
@@ -89,9 +93,12 @@ const state = {
   assistantResponseParts: new Map(),
   assistantResponseTimers: new Map(),
   assistantResponseMeta: new Map(),
+  activeAssistantAudioResponseIds: new Set(),
+  microphoneRestoreTimer: null,
   processedAssistantResponseKeys: new Set(),
   processedAssistantResponses: new Set(),
   userTextByItem: new Map(),
+  userTurnByItem: new Map(),
   userItemSpeechStoppedAt: new Map(),
   processedUserTranscriptKeys: new Set(),
   lastSpeechStoppedAt: 0,
@@ -173,6 +180,12 @@ function loadSettings() {
     if (Number(settings.vadSilenceMs) < 500) {
       settings.vadSilenceMs = defaultSettings.vadSilenceMs;
     }
+    if (Number(settings.vadThreshold) === 0.55) settings.vadThreshold = defaultSettings.vadThreshold;
+    if (!Number.isFinite(Number(settings.vadThreshold))) settings.vadThreshold = defaultSettings.vadThreshold;
+    if (!Number.isFinite(Number(settings.vadMinSpeechMs)) || Number(settings.vadMinSpeechMs) < 0 || Number(settings.vadMinSpeechMs) > 2000) {
+      settings.vadMinSpeechMs = defaultSettings.vadMinSpeechMs;
+    }
+    settings.noiseReduction = normalizeNoiseReductionSetting(settings.noiseReduction);
     return settings;
   } catch {
     return { ...defaultSettings };
@@ -192,9 +205,15 @@ function normalizeAdvisorDeploymentSetting(value) {
   return aliases[raw.toLowerCase()] || raw;
 }
 
+function normalizeNoiseReductionSetting(value) {
+  const mode = String(value || defaultSettings.noiseReduction).trim().toLowerCase();
+  return ['far_field', 'near_field', 'off'].includes(mode) ? mode : defaultSettings.noiseReduction;
+}
+
 function saveSettings(next) {
   state.settings = { ...defaultSettings, ...next };
   state.settings.advisorDeployment = normalizeAdvisorDeploymentSetting(state.settings.advisorDeployment);
+  state.settings.noiseReduction = normalizeNoiseReductionSetting(state.settings.noiseReduction);
   state.settings.benchmarkAdvisorDeployments = String(state.settings.benchmarkAdvisorDeployments || '')
     .split(',')
     .map((name) => normalizeAdvisorDeploymentSetting(name.trim()))
@@ -259,7 +278,7 @@ function initSettingsDialog() {
     const data = new FormData(els.settingsForm);
     const next = { ...state.settings };
     for (const [key, value] of data.entries()) next[key] = String(value);
-    for (const key of ['voiceSpeed', 'vadSilenceMs', 'vadThreshold', 'advisorMaxTokens']) {
+    for (const key of ['voiceSpeed', 'vadSilenceMs', 'vadThreshold', 'vadMinSpeechMs', 'advisorMaxTokens']) {
       next[key] = Number(next[key]);
     }
     saveSettings(next);
@@ -296,6 +315,7 @@ function wireEvents() {
   els.btnClearTranscript.addEventListener('click', () => {
     state.transcript = [];
     state.userTextByItem.clear();
+    clearUserTurnState();
     state.userItemSpeechStoppedAt.clear();
     state.processedUserTranscriptKeys.clear();
     els.transcriptFeed.innerHTML = '';
@@ -511,11 +531,12 @@ function updateVRConversationPanels() {
   let userRow = 0;
   for (const item of state.transcript.slice(-STAGE_TRANSCRIPT_LIMIT)) {
     const role = item.role === 'user' ? 'user' : 'assistant';
-    const mesh = createVRTextPanel(compactStageText(item.text, STAGE_BUBBLE_TEXT_LIMIT), {
+    const mesh = createVRTextPanel(normalizeStageText(item.text), {
       role,
       width: 0.82,
       height: 0.24,
       fontSize: 46,
+      truncate: false,
       tail: role === 'user' ? 'right' : 'left',
       background: role === 'user' ? '#b8f20d' : '#f7f8f4',
       color: '#141820'
@@ -571,21 +592,27 @@ function updateVRAdvicePanel(text) {
 function createVRTextPanel(text, options) {
   const canvas = document.createElement('canvas');
   canvas.width = 1024;
-  canvas.height = Math.round(canvas.width * (options.height / options.width));
-  const ctx = canvas.getContext('2d');
+  const minCanvasHeight = Math.round(canvas.width * (options.height / options.width));
+  let ctx = canvas.getContext('2d');
   const paddingX = 78;
   const paddingY = 38;
   const tailSize = options.tail === 'none' ? 0 : 54;
   const rectX = options.tail === 'left' ? tailSize : 0;
   const rectWidth = canvas.width - tailSize;
-  const rectHeight = canvas.height;
+  const maxTextWidth = rectWidth - paddingX * 2;
+  const lineHeight = options.fontSize * 1.24;
+  const maxLines = options.truncate === false ? Infinity : (options.role === 'advice' ? 2 : 3);
 
+  ctx.font = `600 ${options.fontSize}px ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif`;
+  const lines = wrapCanvasText(ctx, text, maxTextWidth, maxLines, options.truncate !== false);
+  canvas.height = Math.max(minCanvasHeight, Math.ceil(paddingY * 2 + lines.length * lineHeight + 28));
+  ctx = canvas.getContext('2d');
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.fillStyle = options.background;
   ctx.shadowColor = 'rgba(0, 0, 0, 0.28)';
   ctx.shadowBlur = 26;
   ctx.shadowOffsetY = 10;
-  drawBubbleShape(ctx, rectX + 8, 8, rectWidth - 16, rectHeight - 24, 42, options.tail, tailSize);
+  drawBubbleShape(ctx, rectX + 8, 8, rectWidth - 16, canvas.height - 24, 42, options.tail, tailSize);
   ctx.fill();
 
   ctx.shadowColor = 'transparent';
@@ -594,12 +621,9 @@ function createVRTextPanel(text, options) {
   ctx.textBaseline = 'middle';
   ctx.font = `600 ${options.fontSize}px ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif`;
 
-  const maxTextWidth = rectWidth - paddingX * 2;
-  const maxLines = options.role === 'advice' ? 2 : 3;
-  const lines = wrapCanvasText(ctx, text, maxTextWidth, maxLines);
-  const lineHeight = options.fontSize * 1.24;
   const textCenterX = rectX + rectWidth / 2;
-  const textStartY = paddingY + (rectHeight - paddingY * 2 - (lines.length - 1) * lineHeight) / 2;
+  const textBlockHeight = (lines.length - 1) * lineHeight;
+  const textStartY = paddingY + (canvas.height - paddingY * 2 - textBlockHeight) / 2;
   lines.forEach((line, index) => {
     ctx.fillText(line, textCenterX, textStartY + index * lineHeight);
   });
@@ -609,7 +633,7 @@ function createVRTextPanel(text, options) {
   texture.needsUpdate = true;
 
   const mesh = new THREE.Mesh(
-    new THREE.PlaneGeometry(options.width, options.height),
+    new THREE.PlaneGeometry(options.width, options.width * (canvas.height / canvas.width)),
     new THREE.MeshBasicMaterial({
       map: texture,
       transparent: true,
@@ -648,7 +672,7 @@ function drawBubbleShape(ctx, x, y, width, height, radius, tail, tailSize) {
   ctx.closePath();
 }
 
-function wrapCanvasText(ctx, text, maxWidth, maxLines) {
+function wrapCanvasText(ctx, text, maxWidth, maxLines, truncate = true) {
   const source = String(text || '').replace(/\s+/g, ' ').trim();
   if (!source) return [''];
   const units = Array.from(source);
@@ -663,13 +687,13 @@ function wrapCanvasText(ctx, text, maxWidth, maxLines) {
     }
     lines.push(line.trim());
     line = unit;
-    if (lines.length === maxLines) break;
+    if (truncate && lines.length === maxLines) break;
   }
   if (lines.length < maxLines && line) lines.push(line.trim());
-  if (lines.length > maxLines) lines.length = maxLines;
+  if (truncate && lines.length > maxLines) lines.length = maxLines;
 
   const consumed = lines.join('');
-  if (consumed.length < source.length && lines.length) {
+  if (truncate && consumed.length < source.length && lines.length) {
     lines[lines.length - 1] = `${lines[lines.length - 1].replace(/…$/, '').slice(0, -1)}…`;
   }
   return lines;
@@ -862,7 +886,8 @@ async function startRealtime() {
       voice: state.expectedRealtimeVoice,
       voiceSpeed: Number(state.settings.voiceSpeed),
       vadSilenceMs: Number(state.settings.vadSilenceMs),
-      vadThreshold: Number(state.settings.vadThreshold)
+      vadThreshold: Number(state.settings.vadThreshold),
+      noiseReduction: state.settings.noiseReduction
     };
     state.realtimeCounters.tokenRequests += 1;
     logEvent({
@@ -1042,20 +1067,18 @@ function handleRealtimeEvent(event, sessionId) {
       confirmRealtimeSession(event, sessionId, 'session_updated');
       break;
     case 'input_audio_buffer.speech_started':
-      state.localUserSpeaking = true;
-      setAvatarMood('listening');
-      setConnectionStatus('listening');
+      startUserTurn(event);
       break;
     case 'input_audio_buffer.speech_stopped':
-      state.localUserSpeaking = false;
-      state.lastSpeechStoppedAt = performance.now();
-      if (event.item_id) state.userItemSpeechStoppedAt.set(event.item_id, state.lastSpeechStoppedAt);
-      setConnectionStatus('thinking');
+      stopUserTurn(event, sessionId);
+      break;
+    case 'input_audio_buffer.committed':
+      markUserTurnCommitted(event);
       break;
     case 'conversation.item.created':
     case 'conversation.item.added':
     case 'conversation.item.retrieved': {
-      handleConversationItem(event);
+      handleConversationItem(event, sessionId);
       break;
     }
     case 'conversation.item.input_audio_transcription.delta':
@@ -1064,7 +1087,7 @@ function handleRealtimeEvent(event, sessionId) {
       break;
     case 'conversation.item.input_audio_transcription.completed':
     case 'conversation.item.audio_transcription.completed':
-      completeUserTranscript(event);
+      completeUserTranscript(event, sessionId);
       break;
     case 'conversation.item.input_audio_transcription.failed':
     case 'conversation.item.audio_transcription.failed':
@@ -1077,6 +1100,8 @@ function handleRealtimeEvent(event, sessionId) {
       break;
     case 'output_audio_buffer.started':
       state.avatarSpeaking = true;
+      clearTimeout(state.microphoneRestoreTimer);
+      state.activeAssistantAudioResponseIds.add(audioOutputKey(event));
       setMicrophoneTracksEnabled(false, 'avatar_speaking');
       setAvatarMood('speaking');
       setConnectionStatus('avatar speaking');
@@ -1091,10 +1116,12 @@ function handleRealtimeEvent(event, sessionId) {
       }
       break;
     case 'output_audio_buffer.stopped':
-      state.avatarSpeaking = false;
-      setMicrophoneTracksEnabled(true, 'avatar_finished');
-      setAvatarMood('neutral');
-      setConnectionStatus('connected');
+      if (event.response_id || event.item_id) {
+        state.activeAssistantAudioResponseIds.delete(audioOutputKey(event));
+      } else {
+        state.activeAssistantAudioResponseIds.clear();
+      }
+      finishAvatarAudioOutput(sessionId, 'avatar_finished');
       updateAssistantResponseMeta(event.response_id, {
         outputAudioStoppedAt: performance.now()
       });
@@ -1135,10 +1162,8 @@ function handleRealtimeEvent(event, sessionId) {
     }
     case 'response.done':
       updateAssistantResponseMeta(event.response?.id || event.response_id, responseMetaFromDoneEvent(event));
-      state.avatarSpeaking = false;
-      setMicrophoneTracksEnabled(true, 'response_done');
-      setAvatarMood('neutral');
       flushAssistantResponse(event.response?.id || event.response_id, sessionId, 'response_done');
+      finishAvatarAudioOutput(sessionId, 'response_done');
       break;
     case 'error':
     case 'session.error':
@@ -1206,6 +1231,209 @@ function responseDoneKey(event, contentKey) {
   ].join(':');
 }
 
+function audioOutputKey(event) {
+  return event.response_id || event.item_id || 'active-output-audio';
+}
+
+function startUserTurn(event) {
+  state.localUserSpeaking = true;
+  setAvatarMood('listening');
+  setConnectionStatus('listening');
+
+  const itemId = event.item_id || `pending-${event.event_id || Date.now().toString(36)}`;
+  const previous = state.userTurnByItem.get(itemId) || {};
+  clearTimeout(previous.decisionTimer);
+  state.userTurnByItem.set(itemId, {
+    ...previous,
+    itemId,
+    audioStartMs: Number(event.audio_start_ms),
+    perfStartedAt: performance.now(),
+    perfStoppedAt: 0,
+    transcriptText: previous.transcriptText || '',
+    committed: Boolean(previous.committed),
+    accepted: false,
+    ignored: false,
+    responseSent: false,
+    decisionTimer: null
+  });
+}
+
+function stopUserTurn(event, sessionId) {
+  state.localUserSpeaking = false;
+  setConnectionStatus('checking input');
+
+  const itemId = event.item_id || `pending-${event.event_id || Date.now().toString(36)}`;
+  const turn = ensureUserTurn(itemId);
+  turn.audioEndMs = Number(event.audio_end_ms);
+  turn.perfStoppedAt = performance.now();
+  turn.approxSpeechMs = estimateSpeechDurationMs(turn);
+  state.userTurnByItem.set(itemId, turn);
+  scheduleUserTurnDecision(itemId, sessionId, USER_TURN_TRANSCRIPT_WAIT_MS, 'speech_stopped');
+}
+
+function markUserTurnCommitted(event) {
+  if (!event.item_id) return;
+  const turn = ensureUserTurn(event.item_id);
+  turn.committed = true;
+  turn.previousItemId = event.previous_item_id || '';
+  state.userTurnByItem.set(event.item_id, turn);
+}
+
+function ensureUserTurn(itemId) {
+  return state.userTurnByItem.get(itemId) || {
+    itemId,
+    audioStartMs: NaN,
+    audioEndMs: NaN,
+    perfStartedAt: 0,
+    perfStoppedAt: 0,
+    approxSpeechMs: 0,
+    transcriptText: '',
+    committed: false,
+    accepted: false,
+    ignored: false,
+    responseSent: false,
+    decisionTimer: null
+  };
+}
+
+function estimateSpeechDurationMs(turn) {
+  const start = Number(turn.audioStartMs);
+  const end = Number(turn.audioEndMs);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return 0;
+  const silenceMs = Number(state.settings.vadSilenceMs) || defaultSettings.vadSilenceMs;
+  return Math.max(0, Math.round(end - start - VAD_PREFIX_PADDING_MS - silenceMs));
+}
+
+function scheduleUserTurnDecision(itemId, sessionId, delayMs, reason) {
+  const turn = state.userTurnByItem.get(itemId);
+  if (!turn || turn.accepted || turn.ignored) return;
+  clearTimeout(turn.decisionTimer);
+  turn.decisionTimer = setTimeout(() => {
+    decideUserTurn(itemId, sessionId, reason);
+  }, delayMs);
+}
+
+function decideUserTurn(itemId, sessionId, reason) {
+  if (!isActiveRealtimeSession(sessionId)) return;
+  const turn = state.userTurnByItem.get(itemId);
+  if (!turn || turn.accepted || turn.ignored) return;
+
+  const decision = userTurnDecision(turn);
+  if (decision.accept) {
+    acceptUserTurn(turn, sessionId, decision.reason || reason);
+    return;
+  }
+  ignoreUserTurn(turn, sessionId, decision.reason || reason);
+}
+
+function userTurnDecision(turn) {
+  const text = String(turn.transcriptText || '').trim();
+  if (hasUsefulTranscript(text)) {
+    return { accept: true, reason: 'transcript' };
+  }
+  const configuredGateMs = Number(state.settings.vadMinSpeechMs);
+  const gateMs = Number.isFinite(configuredGateMs) ? Math.max(0, configuredGateMs) : defaultSettings.vadMinSpeechMs;
+  if (Number(turn.approxSpeechMs) >= gateMs) {
+    return { accept: true, reason: 'duration' };
+  }
+  return { accept: false, reason: 'short_noise' };
+}
+
+function hasUsefulTranscript(text) {
+  const normalized = String(text || '')
+    .replace(/[、。！？!?.,，．・「」『』（）()\[\]\s]/g, '')
+    .trim();
+  if (!normalized) return false;
+  if (/^(ありがとう|ありがとうございました|ご視聴ありがとうございました|ご清聴ありがとうございました)$/.test(normalized)) return false;
+  if (/^(ピン|ポン|ピロン|カチ|カチャ|カタカタ|チーン|通知音|着信音|バイブ|ding|beep)$/i.test(normalized)) return false;
+  if (/^(はい|うん|ええ|そう|そうですね|ですね|いや|まあ|なるほど)$/.test(normalized)) return true;
+  return normalized.length >= 2 && /[\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}A-Za-z0-9]/u.test(normalized);
+}
+
+function acceptUserTurn(turn, sessionId, reason) {
+  clearTimeout(turn.decisionTimer);
+  turn.accepted = true;
+  state.userTurnByItem.set(turn.itemId, turn);
+  const stoppedAt = turn.perfStoppedAt || performance.now();
+  state.lastSpeechStoppedAt = stoppedAt;
+  if (turn.itemId) state.userItemSpeechStoppedAt.set(turn.itemId, stoppedAt);
+  setConnectionStatus('thinking');
+  logEvent({
+    type: 'client.user_turn_accepted',
+    sessionId,
+    item_id: turn.itemId,
+    reason,
+    approxSpeechMs: Number(turn.approxSpeechMs) || 0,
+    transcriptChars: String(turn.transcriptText || '').trim().length
+  });
+  flushAcceptedUserTranscript(turn);
+  sendManualResponseCreate(turn, sessionId, reason);
+}
+
+function ignoreUserTurn(turn, sessionId, reason) {
+  clearTimeout(turn.decisionTimer);
+  turn.ignored = true;
+  state.userTurnByItem.set(turn.itemId, turn);
+  deleteUserTextForItem(turn.itemId);
+  setConnectionStatus(state.avatarSpeaking ? 'avatar speaking' : 'connected');
+  logEvent({
+    type: 'client.noise_turn_ignored',
+    sessionId,
+    item_id: turn.itemId,
+    reason,
+    approxSpeechMs: Number(turn.approxSpeechMs) || 0,
+    transcriptChars: String(turn.transcriptText || '').trim().length
+  });
+  deleteConversationItem(turn.itemId, sessionId, reason);
+}
+
+function flushAcceptedUserTranscript(turn) {
+  const text = String(turn.transcriptText || '').trim();
+  if (!text) return;
+  completeUserTranscript({
+    item_id: turn.itemId,
+    content_index: 0,
+    transcript: text
+  }, state.activeRealtimeSessionId);
+}
+
+function sendManualResponseCreate(turn, sessionId, reason) {
+  if (turn.responseSent || !isActiveRealtimeSession(sessionId) || state.dataChannel?.readyState !== 'open') return;
+  turn.responseSent = true;
+  state.userTurnByItem.set(turn.itemId, turn);
+  state.lastResponseStartedAt = performance.now();
+  state.dataChannel.send(JSON.stringify({ type: 'response.create' }));
+  logEvent({
+    type: 'client.manual_response_create_sent',
+    sessionId,
+    item_id: turn.itemId,
+    reason
+  });
+}
+
+function deleteConversationItem(itemId, sessionId, reason) {
+  if (!itemId || itemId.startsWith('pending-') || !isActiveRealtimeSession(sessionId) || state.dataChannel?.readyState !== 'open') return;
+  state.dataChannel.send(JSON.stringify({ type: 'conversation.item.delete', item_id: itemId }));
+  logEvent({
+    type: 'client.conversation_item_delete_sent',
+    sessionId,
+    item_id: itemId,
+    reason
+  });
+}
+
+function clearUserTurnState() {
+  for (const turn of state.userTurnByItem.values()) clearTimeout(turn.decisionTimer);
+  state.userTurnByItem.clear();
+}
+
+function deleteUserTextForItem(itemId) {
+  if (!itemId) return;
+  for (const key of state.userTextByItem.keys()) {
+    if (key === itemId || key.startsWith(`${itemId}:`)) state.userTextByItem.delete(key);
+  }
+}
+
 function userTranscriptKey(event) {
   return [
     event.item_id || 'no-item',
@@ -1213,9 +1441,14 @@ function userTranscriptKey(event) {
   ].join(':');
 }
 
-function handleConversationItem(event) {
+function handleConversationItem(event, sessionId) {
   const item = event.item || {};
   if (item.role !== 'user' || !Array.isArray(item.content)) return;
+  if (item.id) {
+    const turn = ensureUserTurn(item.id);
+    turn.conversationItemCreated = true;
+    state.userTurnByItem.set(item.id, turn);
+  }
   for (let index = 0; index < item.content.length; index += 1) {
     const content = item.content[index];
     if (content?.type !== 'input_audio') continue;
@@ -1225,7 +1458,7 @@ function handleConversationItem(event) {
         item_id: item.id,
         content_index: index,
         transcript
-      });
+      }, sessionId);
     } else {
       logEvent({ type: 'client.user_audio_pending_transcript', item_id: item.id || null, content_index: index });
     }
@@ -1236,14 +1469,34 @@ function appendUserTranscriptDelta(event) {
   const key = userTranscriptKey(event);
   const nextText = `${state.userTextByItem.get(key) || ''}${event.delta || ''}`;
   state.userTextByItem.set(key, nextText);
+  if (event.item_id && state.userTurnByItem.has(event.item_id)) {
+    const turn = ensureUserTurn(event.item_id);
+    turn.transcriptText = nextText.trim();
+    state.userTurnByItem.set(event.item_id, turn);
+  }
 }
 
-function completeUserTranscript(event) {
+function completeUserTranscript(event, sessionId = state.activeRealtimeSessionId) {
   const key = userTranscriptKey(event);
   if (state.processedUserTranscriptKeys.has(key)) return;
   const text = String(event.transcript || state.userTextByItem.get(key) || '').trim();
   state.userTextByItem.delete(key);
   if (!text) return;
+  const turn = event.item_id ? state.userTurnByItem.get(event.item_id) : null;
+  if (turn) {
+    turn.transcriptText = text;
+    state.userTurnByItem.set(event.item_id, turn);
+    if (turn.ignored) {
+      logEvent({ type: 'client.user_transcript_ignored', item_id: event.item_id || null, textChars: text.length });
+      return;
+    }
+    if (!turn.accepted) {
+      if (hasUsefulTranscript(text) && turn.perfStoppedAt) {
+        decideUserTurn(event.item_id, sessionId, 'transcript_completed');
+      }
+      return;
+    }
+  }
   state.processedUserTranscriptKeys.add(key);
   if (state.processedUserTranscriptKeys.size > 120) {
     state.processedUserTranscriptKeys = new Set(Array.from(state.processedUserTranscriptKeys).slice(-60));
@@ -1392,6 +1645,25 @@ function latestTranscriptByRole(role, minPerfAt = 0) {
   return null;
 }
 
+function finishAvatarAudioOutput(sessionId, reason) {
+  if (!isActiveRealtimeSession(sessionId)) return;
+  if (state.activeAssistantAudioResponseIds.size) {
+    state.avatarSpeaking = true;
+    setAvatarMood('speaking');
+    setConnectionStatus('avatar speaking');
+    return;
+  }
+
+  state.avatarSpeaking = false;
+  setAvatarMood('neutral');
+  setConnectionStatus('connected');
+  clearTimeout(state.microphoneRestoreTimer);
+  state.microphoneRestoreTimer = setTimeout(() => {
+    if (!isActiveRealtimeSession(sessionId) || state.activeAssistantAudioResponseIds.size) return;
+    setMicrophoneTracksEnabled(true, reason);
+  }, AVATAR_AUDIO_RELEASE_DELAY_MS);
+}
+
 function setMicrophoneTracksEnabled(enabled, reason = 'manual', sessionId = state.activeRealtimeSessionId) {
   if (!isActiveRealtimeSession(sessionId)) return;
   state.microphoneEnabled = Boolean(enabled);
@@ -1457,16 +1729,20 @@ async function stopRealtime(showMessage = true, sessionId = state.activeRealtime
   state.assistantResponseTimers.clear();
   state.assistantResponseParts.clear();
   state.assistantResponseMeta.clear();
+  state.activeAssistantAudioResponseIds.clear();
   state.processedAssistantResponseKeys.clear();
   state.processedAssistantResponses.clear();
   state.userTextByItem.clear();
+  clearUserTurnState();
   state.userItemSpeechStoppedAt.clear();
   state.processedUserTranscriptKeys.clear();
   state.currentAssistantText = '';
   clearTimeout(state.advisorQueueTimer);
+  clearTimeout(state.microphoneRestoreTimer);
   clearTimeout(state.sessionUpdateFallbackTimer);
   clearTimeout(state.sessionUpdateWatchdogTimer);
   state.advisorQueueTimer = null;
+  state.microphoneRestoreTimer = null;
   state.sessionUpdateFallbackTimer = null;
   state.sessionUpdateWatchdogTimer = null;
   state.realtimeSessionConfigured = false;
@@ -1558,7 +1834,7 @@ function renderStageTranscript() {
   for (const item of state.transcript.slice(-STAGE_TRANSCRIPT_LIMIT)) {
     const bubble = document.createElement('div');
     bubble.className = `stageTranscriptBubble ${item.role}`;
-    bubble.textContent = compactStageText(item.text, STAGE_BUBBLE_TEXT_LIMIT);
+    bubble.textContent = normalizeStageText(item.text);
     els.stageChatOverlay.appendChild(bubble);
   }
 }
@@ -1592,12 +1868,16 @@ function setStageAdvice(text) {
   updateVRAdvicePanel(displayText);
 }
 
-function compactStageText(text, limit) {
-  const normalized = String(text || '')
+function normalizeStageText(text) {
+  return String(text || '')
     .replace(/\s*理由:\s*/g, '\n理由: ')
     .replace(/[ \t]+/g, ' ')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
+}
+
+function compactStageText(text, limit) {
+  const normalized = normalizeStageText(text);
   if (normalized.length <= limit) return normalized;
   return `${normalized.slice(0, Math.max(0, limit - 1)).trim()}…`;
 }
