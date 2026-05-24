@@ -33,7 +33,12 @@
 
   <main class="layout">
     <section class="stagePanel">
-      <div id="vrmStage" class="stage"></div>
+      <div id="vrmStage" class="stage">
+        <div id="stageOverlay" class="stageOverlay" aria-hidden="true">
+          <div id="stageChatOverlay" class="stageChatOverlay"></div>
+          <div id="stageAdviceOverlay" class="stageAdviceOverlay">アドバイス</div>
+        </div>
+      </div>
       <div class="statusbar">
         <span id="connectionStatus" class="statusChip">idle</span>
         <span id="avatarStatus">avatar: loading</span>

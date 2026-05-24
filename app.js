@@ -18,7 +18,7 @@ const defaultSettings = Object.freeze({
   reasoningEffort: 'none',
   benchmarkAdvisorDeployments: 'grok-4-20-non-reasoning,gpt-5.4-nano',
   realtimeInstructions: `あなたは雑談訓練用アバターです。目的は、在宅勤務に慣れた社員がオフィスで自然に短い雑談をできるようにすることです。\n\n制約:\n- 日本語で話す。\n- 返答は原則1文、長くても2文。\n- 最初の反応は短い相づち、共感、軽い質問を優先する。\n- 相手を評価しすぎない。\n- ビジネス上の機密、医療、法律、金融の助言は避ける。\n- 会話のテンポを最優先し、考え込まない。`,
-  advisorInstructions: `あなたは会話練習のリアルタイム助言AIです。入力JSONの speaker="user" は訓練者本人で、画面では「あなた」と表示されます。speaker="avatar" は会話相手のAIアバターで、画面では「アバター」と表示されます。アバター発話をあなた自身の返答や訓練者発話として扱わないでください。\n\n助言対象:\n- latest_user_utterance がある場合、その user 発話だけを評価する。\n- conversation_log の avatar 発話は文脈としてだけ使う。\n- latest_user_utterance が null の場合だけ、アバター応答から状況を控えめに推定し、訓練者の発話内容を断定しない。\n\n出力形式:\n{ "label": "good|warn|risk", "advice": "1〜3文の日本語助言", "reason": "短い理由" }\n\n評価軸:\n- ユーザー発話が会話として成立しているか。\n- ぶつ切り、未完、文脈不足に見えないか。\n- 次にユーザーが足すと自然な一言があるか。\n- 相手の話を受ける余地があるか。\n\n制約:\n- 返答はJSONのみ。\n- 速度優先。`
+  advisorInstructions: `あなたは会話練習のリアルタイム助言AIです。入力JSONの speaker="user" は訓練者本人で、画面では「あなた」と表示されます。speaker="avatar" は会話相手のAIアバターで、画面では「アバター」と表示されます。アバター発話をあなた自身の返答や訓練者発話として扱わないでください。\n\n助言対象:\n- latest_user_utterance がある場合、その user 発話だけを評価する。\n- conversation_log の avatar 発話は文脈としてだけ使う。\n- latest_user_utterance が null の場合だけ、アバター応答から状況を控えめに推定し、訓練者の発話内容を断定しない。\n\n出力形式:\n{ "label": "good|warn|risk", "advice": "1〜3文の日本語助言", "reason": "短い理由" }\n\n評価軸:\n- ユーザー発話が会話として成立しているか。\n- なごやかで居心地の良い雰囲気を維持しようとしているか。\n- ユーザーが自分の話したいことだけを話していないか。\n- 相手の話題に反復できているか。\n\n制約:\n- 返答はJSONのみ。\n- 速度優先。`
 });
 
 const ADVISOR_MIN_INTERVAL_MS = 3000;
@@ -27,8 +27,11 @@ const ADVISOR_ERROR_MUTE_MS = 60000;
 const ADVISOR_TRANSCRIPT_GRACE_MS = 1200;
 const ASSISTANT_RESPONSE_FALLBACK_FLUSH_MS = 2500;
 const DIAGNOSTIC_LOG_LIMIT = 1000;
-const AVATAR_VRM_URL = './assets/QuQu_U.vrm';
-const AVATAR_VRMA_URL = './assets/relaxed_stand_idle_1s_skeleton_only.vrma';
+const STAGE_TRANSCRIPT_LIMIT = 4;
+const STAGE_BUBBLE_TEXT_LIMIT = 86;
+const STAGE_ADVICE_TEXT_LIMIT = 96;
+const AVATAR_VRM_URL = './assets/8590256991748008892.vrm';
+const AVATAR_VRMA_URL = './assets/relaxed_stand_idle_1s_skeleton_only_human_breath.vrma';
 
 const serverSettingKeys = Object.freeze([
   'realtimeDeployment',
@@ -42,6 +45,8 @@ const els = {
   avatarStatus: document.getElementById('avatarStatus'),
   latencyStatus: document.getElementById('latencyStatus'),
   remoteAudio: document.getElementById('remoteAudio'),
+  stageChatOverlay: document.getElementById('stageChatOverlay'),
+  stageAdviceOverlay: document.getElementById('stageAdviceOverlay'),
   adviceFeed: document.getElementById('adviceFeed'),
   transcriptFeed: document.getElementById('transcriptFeed'),
   metricsFeed: document.getElementById('metricsFeed'),
@@ -114,6 +119,11 @@ const sceneState = {
   camera: null,
   controls: null,
   frontKeyLight: null,
+  vrConversationGroup: null,
+  vrHudGroup: null,
+  vrConversationMeshes: [],
+  vrAdviceMesh: null,
+  latestVRAdviceText: 'アドバイス',
   vrm: null,
   animationMixer: null,
   clock: new THREE.Clock(),
@@ -279,13 +289,18 @@ function wireEvents() {
   });
   els.btnHealth.addEventListener('click', checkHealth);
   els.btnBenchAdvisor.addEventListener('click', benchmarkAdvisorModels);
-  els.btnClearAdvice.addEventListener('click', () => els.adviceFeed.innerHTML = '');
+  els.btnClearAdvice.addEventListener('click', () => {
+    els.adviceFeed.innerHTML = '';
+    setStageAdvice('アドバイス');
+  });
   els.btnClearTranscript.addEventListener('click', () => {
     state.transcript = [];
     state.userTextByItem.clear();
     state.userItemSpeechStoppedAt.clear();
     state.processedUserTranscriptKeys.clear();
     els.transcriptFeed.innerHTML = '';
+    renderStageTranscript();
+    updateVRConversationPanels();
   });
   els.btnClearEvents.addEventListener('click', () => {
     state.diagnosticEvents = [];
@@ -331,6 +346,7 @@ function initScene() {
   sceneState.camera = camera;
   sceneState.renderer = renderer;
   sceneState.controls = controls;
+  setupVRTextPanels(scene, camera);
 
   const resize = () => {
     const rect = els.stage.getBoundingClientRect();
@@ -470,10 +486,221 @@ function fitVRM(vrm) {
   vrm.scene.scale.setScalar(scale);
 }
 
+function setupVRTextPanels(scene, camera) {
+  const conversationGroup = new THREE.Group();
+  conversationGroup.name = 'vrConversationBubbles';
+  conversationGroup.visible = false;
+  scene.add(conversationGroup);
+
+  const hudGroup = new THREE.Group();
+  hudGroup.name = 'vrConversationHud';
+  hudGroup.visible = false;
+  camera.add(hudGroup);
+
+  sceneState.vrConversationGroup = conversationGroup;
+  sceneState.vrHudGroup = hudGroup;
+  updateVRConversationPanels();
+  updateVRAdvicePanel(sceneState.latestVRAdviceText);
+}
+
+function updateVRConversationPanels() {
+  if (!sceneState.vrConversationGroup || !sceneState.vrHudGroup) return;
+  clearVRConversationPanels();
+
+  let avatarRow = 0;
+  let userRow = 0;
+  for (const item of state.transcript.slice(-STAGE_TRANSCRIPT_LIMIT)) {
+    const role = item.role === 'user' ? 'user' : 'assistant';
+    const mesh = createVRTextPanel(compactStageText(item.text, STAGE_BUBBLE_TEXT_LIMIT), {
+      role,
+      width: 0.82,
+      height: 0.24,
+      fontSize: 46,
+      tail: role === 'user' ? 'right' : 'left',
+      background: role === 'user' ? '#b8f20d' : '#f7f8f4',
+      color: '#141820'
+    });
+    mesh.renderOrder = 30;
+
+    if (role === 'user') {
+      mesh.position.set(0.48, 0.25 - userRow * 0.22, -1.35);
+      sceneState.vrHudGroup.add(mesh);
+      userRow += 1;
+    } else {
+      mesh.position.set(-0.82, 1.72 - avatarRow * 0.28, 0.06);
+      mesh.userData.billboardToCamera = true;
+      sceneState.vrConversationGroup.add(mesh);
+      avatarRow += 1;
+    }
+    sceneState.vrConversationMeshes.push(mesh);
+  }
+}
+
+function clearVRConversationPanels() {
+  for (const mesh of sceneState.vrConversationMeshes) {
+    mesh.parent?.remove(mesh);
+    disposeVRTextPanel(mesh);
+  }
+  sceneState.vrConversationMeshes = [];
+}
+
+function updateVRAdvicePanel(text) {
+  sceneState.latestVRAdviceText = text || 'アドバイス';
+  if (!sceneState.vrHudGroup) return;
+  if (sceneState.vrAdviceMesh) {
+    sceneState.vrHudGroup.remove(sceneState.vrAdviceMesh);
+    disposeVRTextPanel(sceneState.vrAdviceMesh);
+    sceneState.vrAdviceMesh = null;
+  }
+
+  const mesh = createVRTextPanel(sceneState.latestVRAdviceText, {
+    role: 'advice',
+    width: 1.25,
+    height: 0.23,
+    fontSize: 50,
+    tail: 'none',
+    background: '#fbfbf6',
+    color: '#151922'
+  });
+  mesh.position.set(0, -0.43, -1.45);
+  mesh.renderOrder = 40;
+  sceneState.vrHudGroup.add(mesh);
+  sceneState.vrAdviceMesh = mesh;
+}
+
+function createVRTextPanel(text, options) {
+  const canvas = document.createElement('canvas');
+  canvas.width = 1024;
+  canvas.height = Math.round(canvas.width * (options.height / options.width));
+  const ctx = canvas.getContext('2d');
+  const paddingX = 78;
+  const paddingY = 38;
+  const tailSize = options.tail === 'none' ? 0 : 54;
+  const rectX = options.tail === 'left' ? tailSize : 0;
+  const rectWidth = canvas.width - tailSize;
+  const rectHeight = canvas.height;
+
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = options.background;
+  ctx.shadowColor = 'rgba(0, 0, 0, 0.28)';
+  ctx.shadowBlur = 26;
+  ctx.shadowOffsetY = 10;
+  drawBubbleShape(ctx, rectX + 8, 8, rectWidth - 16, rectHeight - 24, 42, options.tail, tailSize);
+  ctx.fill();
+
+  ctx.shadowColor = 'transparent';
+  ctx.fillStyle = options.color;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.font = `600 ${options.fontSize}px ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif`;
+
+  const maxTextWidth = rectWidth - paddingX * 2;
+  const maxLines = options.role === 'advice' ? 2 : 3;
+  const lines = wrapCanvasText(ctx, text, maxTextWidth, maxLines);
+  const lineHeight = options.fontSize * 1.24;
+  const textCenterX = rectX + rectWidth / 2;
+  const textStartY = paddingY + (rectHeight - paddingY * 2 - (lines.length - 1) * lineHeight) / 2;
+  lines.forEach((line, index) => {
+    ctx.fillText(line, textCenterX, textStartY + index * lineHeight);
+  });
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.needsUpdate = true;
+
+  const mesh = new THREE.Mesh(
+    new THREE.PlaneGeometry(options.width, options.height),
+    new THREE.MeshBasicMaterial({
+      map: texture,
+      transparent: true,
+      depthTest: false,
+      depthWrite: false,
+      side: THREE.DoubleSide
+    })
+  );
+  mesh.userData.texture = texture;
+  return mesh;
+}
+
+function drawBubbleShape(ctx, x, y, width, height, radius, tail, tailSize) {
+  ctx.beginPath();
+  ctx.moveTo(x + radius, y);
+  ctx.lineTo(x + width - radius, y);
+  ctx.quadraticCurveTo(x + width, y, x + width, y + radius);
+  if (tail === 'right') {
+    ctx.lineTo(x + width, y + height - 78);
+    ctx.lineTo(x + width + tailSize - 8, y + height - 48);
+    ctx.lineTo(x + width, y + height - 26);
+  } else {
+    ctx.lineTo(x + width, y + height - radius);
+  }
+  ctx.lineTo(x + width, y + height - radius);
+  ctx.quadraticCurveTo(x + width, y + height, x + width - radius, y + height);
+  ctx.lineTo(x + radius, y + height);
+  ctx.quadraticCurveTo(x, y + height, x, y + height - radius);
+  if (tail === 'left') {
+    ctx.lineTo(x, y + height - 26);
+    ctx.lineTo(x - tailSize + 8, y + height - 48);
+    ctx.lineTo(x, y + height - 78);
+  }
+  ctx.lineTo(x, y + radius);
+  ctx.quadraticCurveTo(x, y, x + radius, y);
+  ctx.closePath();
+}
+
+function wrapCanvasText(ctx, text, maxWidth, maxLines) {
+  const source = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!source) return [''];
+  const units = Array.from(source);
+  const lines = [];
+  let line = '';
+
+  for (const unit of units) {
+    const next = `${line}${unit}`;
+    if (ctx.measureText(next).width <= maxWidth || !line) {
+      line = next;
+      continue;
+    }
+    lines.push(line.trim());
+    line = unit;
+    if (lines.length === maxLines) break;
+  }
+  if (lines.length < maxLines && line) lines.push(line.trim());
+  if (lines.length > maxLines) lines.length = maxLines;
+
+  const consumed = lines.join('');
+  if (consumed.length < source.length && lines.length) {
+    lines[lines.length - 1] = `${lines[lines.length - 1].replace(/…$/, '').slice(0, -1)}…`;
+  }
+  return lines;
+}
+
+function disposeVRTextPanel(mesh) {
+  mesh.geometry?.dispose();
+  mesh.material?.map?.dispose?.();
+  mesh.material?.dispose?.();
+}
+
+function syncVRTextPanels() {
+  if (!sceneState.renderer || !sceneState.vrConversationGroup || !sceneState.vrHudGroup) return;
+  const presenting = sceneState.renderer.xr.isPresenting;
+  sceneState.vrConversationGroup.visible = presenting;
+  sceneState.vrHudGroup.visible = presenting;
+  if (!presenting) return;
+
+  const xrCamera = sceneState.renderer.xr.getCamera(sceneState.camera) || sceneState.camera;
+  const cameraQuaternion = new THREE.Quaternion();
+  xrCamera.getWorldQuaternion(cameraQuaternion);
+  for (const mesh of sceneState.vrConversationMeshes) {
+    if (mesh.userData.billboardToCamera) mesh.quaternion.copy(cameraQuaternion);
+  }
+}
+
 function renderLoop() {
   const delta = sceneState.clock.getDelta();
   sceneState.controls?.update();
   syncCameraLighting();
+  syncVRTextPanels();
   sceneState.animationMixer?.update(delta);
   animateAvatar(delta);
   sceneState.vrm?.update(delta);
@@ -1313,6 +1540,8 @@ function addTranscript(role, text, options = {}) {
   state.transcript.sort((a, b) => Number(a.perfAt || 0) - Number(b.perfAt || 0));
   if (state.transcript.length > 80) state.transcript.shift();
   renderTranscriptFeed();
+  renderStageTranscript();
+  updateVRConversationPanels();
 }
 
 function renderTranscriptFeed() {
@@ -1321,6 +1550,17 @@ function renderTranscriptFeed() {
     appendTranscriptCard(item.role, item.text);
   }
   scrollToBottom(els.transcriptFeed);
+}
+
+function renderStageTranscript() {
+  if (!els.stageChatOverlay) return;
+  els.stageChatOverlay.innerHTML = '';
+  for (const item of state.transcript.slice(-STAGE_TRANSCRIPT_LIMIT)) {
+    const bubble = document.createElement('div');
+    bubble.className = `stageTranscriptBubble ${item.role}`;
+    bubble.textContent = compactStageText(item.text, STAGE_BUBBLE_TEXT_LIMIT);
+    els.stageChatOverlay.appendChild(bubble);
+  }
 }
 
 function appendTranscriptCard(role, text) {
@@ -1337,6 +1577,29 @@ function addAdvice(source, text, label = 'good', meta = '') {
   card.innerHTML = `<div class="meta"><span>${escapeHtml(source)}</span><span>${escapeHtml(meta || time)}</span></div><div class="body">${escapeHtml(text)}</div>`;
   els.adviceFeed.appendChild(card);
   scrollToBottom(els.adviceFeed);
+  if (shouldShowStageAdvice(source)) {
+    setStageAdvice(text);
+  }
+}
+
+function shouldShowStageAdvice(source) {
+  return /^LLM\b/.test(source) || /^instant\b/.test(source);
+}
+
+function setStageAdvice(text) {
+  const displayText = compactStageText(text, STAGE_ADVICE_TEXT_LIMIT) || 'アドバイス';
+  if (els.stageAdviceOverlay) els.stageAdviceOverlay.textContent = displayText;
+  updateVRAdvicePanel(displayText);
+}
+
+function compactStageText(text, limit) {
+  const normalized = String(text || '')
+    .replace(/\s*理由:\s*/g, '\n理由: ')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  if (normalized.length <= limit) return normalized;
+  return `${normalized.slice(0, Math.max(0, limit - 1)).trim()}…`;
 }
 
 function immediateAdvice(text) {
