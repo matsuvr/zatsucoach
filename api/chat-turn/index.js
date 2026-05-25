@@ -9,9 +9,12 @@ const {
   clampNumber,
   buildChatMessages
 } = require('../_shared/azureOpenAI');
+const { authenticatedUser } = require('../_shared/appAuth');
 
 module.exports = async function (context, req) {
   try {
+    authenticatedUser(req);
+
     const body = parseJsonBody(req);
     const instructions = String(body.instructions || 'あなたは雑談練習用のアバターです。日本語で1文だけ返してください。').slice(0, 6000);
     const maxTokens = clampNumber(body.maxTokens, 2048, 512, 4096);

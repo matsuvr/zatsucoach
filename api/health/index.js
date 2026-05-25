@@ -11,10 +11,13 @@ const {
   jsonResponse,
   errorResponse
 } = require('../_shared/azureOpenAI');
+const { authenticatedUser } = require('../_shared/appAuth');
 const { hasLogStorageConfig } = require('../_shared/logStore');
 
-module.exports = async function (context) {
+module.exports = async function (context, req) {
   try {
+    authenticatedUser(req);
+
     const endpoint = endpointBase();
     const advisorEndpoint = advisorEndpointBase();
     jsonResponse(context, {
@@ -32,7 +35,7 @@ module.exports = async function (context) {
       logSessionsTable: process.env.ZATSUCOACH_LOG_SESSIONS_TABLE || 'ZatsucoachSessions',
       logItemsTable: process.env.ZATSUCOACH_LOG_ITEMS_TABLE || 'ZatsucoachItems',
       transcribeDiagnosticEnabled: String(process.env.ENABLE_TRANSCRIBE_DIAGNOSTIC || '').toLowerCase() === 'true',
-      codeVersion: '2026-05-24-auth-logs',
+      codeVersion: '2026-05-25-email-password-auth',
       node: process.version
     });
   } catch (error) {

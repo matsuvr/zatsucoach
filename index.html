@@ -34,7 +34,31 @@
     </div>
   </header>
 
-  <main class="layout">
+  <section id="loginView" class="loginView" hidden>
+    <div class="loginPanel">
+      <div>
+        <h1>ZatsuCoach MVP</h1>
+        <p>Microsoft アカウント、またはデモ用 Email/Password でログインしてください。</p>
+      </div>
+
+      <a class="button primary loginMicrosoft" href="/.auth/login/aad?post_login_redirect_uri=/">Microsoft でログイン</a>
+
+      <form id="emailLoginForm" class="emailLoginForm">
+        <label>
+          Email
+          <input id="loginEmail" name="email" type="email" autocomplete="username" value="demo2026@catkawaii.com" required />
+        </label>
+        <label>
+          Password
+          <input id="loginPassword" name="password" type="password" autocomplete="current-password" required />
+        </label>
+        <button id="btnEmailLogin" class="primary" type="submit">Email でログイン</button>
+        <div id="loginError" class="loginError" role="alert"></div>
+      </form>
+    </div>
+  </section>
+
+  <main class="layout" hidden>
     <section class="stagePanel">
       <div id="vrmStage" class="stage">
         <div id="stageOverlay" class="stageOverlay" aria-hidden="true">

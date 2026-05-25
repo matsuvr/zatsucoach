@@ -13,6 +13,7 @@ const {
   advisorEndpointRoute,
   advisorApiKey
 } = require('../_shared/azureOpenAI');
+const { authenticatedUser } = require('../_shared/appAuth');
 
 const DEFAULT_INSTRUCTIONS = `You are a real-time Japanese conversation coach. Return only JSON: {"label":"good|warn|risk","advice":"1-3 concise Japanese sentences","reason":"short Japanese reason"}. Prioritize speed and practical next steps.`;
 
@@ -27,6 +28,8 @@ module.exports = async function (context, req) {
   const startedAt = Date.now();
   let requestMeta = {};
   try {
+    authenticatedUser(req);
+
     const body = parseJsonBody(req);
     requestMeta = {
       clientRequestId: String(body.clientRequestId || '').slice(0, 120),

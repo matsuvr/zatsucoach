@@ -9,6 +9,7 @@ const {
   jsonResponse,
   parseJsonBody
 } = require('../_shared/azureOpenAI');
+const { authenticatedUser } = require('../_shared/appAuth');
 
 const ALLOWED_VOICES = new Set([
   'alloy',
@@ -96,6 +97,8 @@ function clientSessionUpdate(session) {
 
 module.exports = async function (context, req) {
   try {
+    authenticatedUser(req);
+
     const endpoint = endpointBase();
     if (!endpoint) throw new Error('AZURE_OPENAI_ENDPOINT or AZURE_OPENAI_RESOURCE is not set');
 

@@ -37,6 +37,8 @@ const STAGE_ADVICE_TEXT_LIMIT = 96;
 const LOG_FLUSH_DELAY_MS = 900;
 const AVATAR_VRM_URL = './assets/8590256991748008892.vrm';
 const AVATAR_VRMA_URL = './assets/relaxed_stand_idle_1s_skeleton_only_human_breath.vrma';
+const DEVELOPER_ACCOUNT_EMAILS = Object.freeze(['developer@example.com']);
+const DEVELOPER_ONLY_TABS = Object.freeze(['metrics', 'events']);
 
 const serverSettingKeys = Object.freeze([
   'realtimeDeployment',
@@ -46,6 +48,11 @@ const serverSettingKeys = Object.freeze([
 
 const els = {
   stage: document.getElementById('vrmStage'),
+  loginView: document.getElementById('loginView'),
+  emailLoginForm: document.getElementById('emailLoginForm'),
+  loginEmail: document.getElementById('loginEmail'),
+  loginPassword: document.getElementById('loginPassword'),
+  loginError: document.getElementById('loginError'),
   accountStatus: document.getElementById('accountStatus'),
   connectionStatus: document.getElementById('connectionStatus'),
   avatarStatus: document.getElementById('avatarStatus'),
@@ -97,6 +104,7 @@ const state = {
   },
   authUser: null,
   authChecked: false,
+  developerToolsEnabled: false,
   logSessionId: '',
   logSessionStartedAt: '',
   logSequence: 0,
@@ -145,6 +153,7 @@ const sceneState = {
   scene: null,
   camera: null,
   controls: null,
+  resizeObserver: null,
   frontKeyLight: null,
   vrConversationGroup: null,
   vrHudGroup: null,
@@ -170,6 +179,7 @@ initTabs();
 initSettingsDialog();
 initScene();
 wireEvents();
+renderDeveloperControls();
 addAdvice('app', 'まず「接続開始」を押してください。マイク許可後、アバターとの音声対話が始まります。', 'good');
 loadAuthState();
 syncServerSettings();
@@ -246,6 +256,7 @@ function saveSettings(next) {
 }
 
 async function syncServerSettings() {
+  if (!state.authUser) return;
   try {
     const response = await fetch('/api/health', { cache: 'no-store' });
     if (!response.ok) return;
@@ -280,7 +291,7 @@ function applyServerSettings(data, announce = true) {
 
 async function loadAuthState() {
   try {
-    const response = await fetch('/.auth/me', { cache: 'no-store' });
+    const response = await fetch('/api/auth/me', { cache: 'no-store' });
     if (!response.ok) throw new Error(`auth check failed: ${response.status}`);
     const data = await safeJson(response);
     const principal = data?.clientPrincipal || null;
@@ -290,8 +301,15 @@ async function loadAuthState() {
     state.authUser = null;
   } finally {
     state.authChecked = true;
+    state.developerToolsEnabled = isDeveloperAccount(state.authUser);
     renderAuthState();
-    if (state.authUser) loadSavedSessions();
+    renderDeveloperControls();
+    if (state.authUser) {
+      loadSavedSessions();
+    } else {
+      resetCurrentLogSession();
+    }
+    if (state.authUser) syncServerSettings();
   }
 }
 
@@ -303,17 +321,127 @@ function renderAuthState() {
   }
   if (els.btnLogin) els.btnLogin.style.display = state.authUser ? 'none' : '';
   if (els.btnLogout) els.btnLogout.style.display = state.authUser ? '' : 'none';
+  if (els.loginView) els.loginView.hidden = Boolean(state.authUser);
+  const main = document.querySelector('main.layout');
+  if (main) main.hidden = !state.authUser;
+  if (state.authUser) scheduleStageResize();
+  if (els.btnConnect) els.btnConnect.disabled = !state.authUser || state.realtimeStarting;
+  if (!state.authUser && location.pathname !== '/login') {
+    history.replaceState(null, '', '/login');
+  } else if (state.authUser && location.pathname === '/login') {
+    history.replaceState(null, '', '/');
+  }
+}
+
+async function loginWithEmail(event) {
+  event.preventDefault();
+  const email = els.loginEmail.value.trim();
+  const password = els.loginPassword.value;
+  if (els.loginError) els.loginError.textContent = '';
+
+  try {
+    const response = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password })
+    });
+    const data = await safeJson(response);
+    if (!response.ok) throw new Error(data.error || `login failed: ${response.status}`);
+    els.loginPassword.value = '';
+    await loadAuthState();
+  } catch (error) {
+    if (els.loginError) els.loginError.textContent = 'ログインできません。Email と Password を確認してください。';
+  }
 }
 
 function initTabs() {
   for (const tab of document.querySelectorAll('.tab')) {
     tab.addEventListener('click', () => {
-      document.querySelectorAll('.tab').forEach((el) => el.classList.remove('active'));
-      document.querySelectorAll('.tabBody').forEach((el) => el.classList.remove('active'));
-      tab.classList.add('active');
-      document.getElementById(`${tab.dataset.tab}Tab`).classList.add('active');
+      activateTab(tab.dataset.tab);
     });
   }
+}
+
+function activateTab(name) {
+  const tab = document.querySelector(`.tab[data-tab="${name}"]`);
+  const body = document.getElementById(`${name}Tab`);
+  if (!tab || !body || tab.hidden || body.hidden) return;
+  document.querySelectorAll('.tab').forEach((el) => el.classList.remove('active'));
+  document.querySelectorAll('.tabBody').forEach((el) => el.classList.remove('active'));
+  tab.classList.add('active');
+  body.classList.add('active');
+}
+
+function renderDeveloperControls() {
+  const enabled = canUseDeveloperTools();
+  setHidden(els.btnHealth, !enabled);
+  setHidden(els.btnSettings, !enabled);
+  for (const name of DEVELOPER_ONLY_TABS) {
+    setHidden(document.querySelector(`.tab[data-tab="${name}"]`), !enabled);
+    setHidden(document.getElementById(`${name}Tab`), !enabled);
+  }
+  if (!enabled) {
+    if (els.settingsDialog?.open) els.settingsDialog.close();
+    if (els.metricsFeed) els.metricsFeed.innerHTML = '';
+    if (els.eventFeed) els.eventFeed.innerHTML = '';
+    state.diagnosticEvents = [];
+    const activeTab = document.querySelector('.tab.active');
+    if (!activeTab || activeTab.hidden || DEVELOPER_ONLY_TABS.includes(activeTab.dataset.tab)) {
+      activateTab('advice');
+    }
+  }
+}
+
+function setHidden(el, hidden) {
+  if (el) el.hidden = Boolean(hidden);
+}
+
+function canUseDeveloperTools() {
+  return Boolean(state.developerToolsEnabled);
+}
+
+function isDeveloperAccount(principal) {
+  const allowed = new Set(DEVELOPER_ACCOUNT_EMAILS);
+  return principalIdentityValues(principal).some((value) => allowed.has(value));
+}
+
+function principalIdentityValues(principal) {
+  if (!principal) return [];
+  const values = [
+    principal.userDetails,
+    claimValue(principal, 'email'),
+    claimValue(principal, 'emailaddress'),
+    claimValue(principal, 'emails'),
+    claimValue(principal, 'preferred_username'),
+    claimValue(principal, 'upn'),
+    claimValue(principal, 'unique_name')
+  ];
+  return values
+    .flatMap(expandIdentityValue)
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+function expandIdentityValue(value) {
+  if (Array.isArray(value)) return value.flatMap(expandIdentityValue);
+  const text = String(value || '').trim();
+  if (!text) return [];
+  try {
+    const parsed = JSON.parse(text);
+    if (Array.isArray(parsed)) return parsed.flatMap(expandIdentityValue);
+  } catch {
+    // Not JSON; split common multi-value claim formats below.
+  }
+  return text.split(/[;,]/);
+}
+
+function claimValue(principal, name) {
+  const claims = Array.isArray(principal?.claims) ? principal.claims : [];
+  const match = claims.find((claim) => {
+    const type = String(claim.typ || claim.type || claim.name || '').toLowerCase();
+    return type === name || type.endsWith(`/${name}`);
+  });
+  return match?.val || match?.value || '';
 }
 
 function initSettingsDialog() {
@@ -348,6 +476,7 @@ function fillSettingsForm() {
 }
 
 function wireEvents() {
+  els.emailLoginForm.addEventListener('submit', loginWithEmail);
   els.btnConnect.addEventListener('click', startRealtime);
   els.btnDisconnect.addEventListener('click', stopRealtime);
   els.btnSendText.addEventListener('click', sendText);
@@ -422,17 +551,34 @@ function initScene() {
   sceneState.controls = controls;
   setupVRTextPanels(scene, camera);
 
-  const resize = () => {
-    const rect = els.stage.getBoundingClientRect();
-    renderer.setSize(rect.width, rect.height, false);
-    camera.aspect = Math.max(rect.width / Math.max(rect.height, 1), 0.1);
-    camera.updateProjectionMatrix();
-  };
-  window.addEventListener('resize', resize);
-  resize();
+  window.addEventListener('resize', resizeStageRenderer);
+  if ('ResizeObserver' in window) {
+    sceneState.resizeObserver = new ResizeObserver(resizeStageRenderer);
+    sceneState.resizeObserver.observe(els.stage);
+  }
+  resizeStageRenderer();
 
   loadVRM(AVATAR_VRM_URL);
   renderer.setAnimationLoop(renderLoop);
+}
+
+function scheduleStageResize() {
+  requestAnimationFrame(() => {
+    resizeStageRenderer();
+    requestAnimationFrame(resizeStageRenderer);
+  });
+}
+
+function resizeStageRenderer() {
+  if (!sceneState.renderer || !sceneState.camera || !els.stage) return;
+  const rect = els.stage.getBoundingClientRect();
+  const width = Math.floor(rect.width);
+  const height = Math.floor(rect.height);
+  if (width <= 0 || height <= 0) return;
+
+  sceneState.renderer.setSize(width, height, false);
+  sceneState.camera.aspect = Math.max(width / height, 0.1);
+  sceneState.camera.updateProjectionMatrix();
 }
 
 function loadVRM(url) {
@@ -919,6 +1065,11 @@ function resetLipSyncAudio() {
 }
 
 async function startRealtime() {
+  if (!state.authUser) {
+    renderAuthState();
+    if (els.loginError) els.loginError.textContent = 'ログインしてから接続してください。';
+    return;
+  }
   if (state.realtimeStarting || state.pc || state.dataChannel) {
     logEvent({ type: 'client.realtime_start_skipped', reason: 'already_active', sessionId: state.activeRealtimeSessionId });
     return;
@@ -1810,6 +1961,11 @@ async function stopRealtime(showMessage = true, sessionId = state.activeRealtime
 }
 
 async function sendText() {
+  if (!state.authUser) {
+    renderAuthState();
+    if (els.loginError) els.loginError.textContent = 'ログインしてから送信してください。';
+    return;
+  }
   const text = els.textInput.value.trim();
   if (!text) return;
   els.textInput.value = '';
@@ -2096,7 +2252,9 @@ function resetCurrentLogSession() {
 async function loadSavedSessions() {
   if (!canPersistLogs()) {
     renderSavedSessions([]);
-    if (els.savedLogFeed) els.savedLogFeed.innerHTML = '<div class="card"><div class="body">ログインすると保存ログを表示できます。</div></div>';
+    if (els.savedLogFeed) {
+      els.savedLogFeed.innerHTML = '<div class="card"><div class="body">ログインすると保存ログを表示できます。</div></div>';
+    }
     return;
   }
   try {
@@ -2405,6 +2563,7 @@ function formatAdvisorError(data, status) {
 }
 
 async function benchmarkAdvisorModels() {
+  if (!canUseDeveloperTools()) return;
   const models = String(state.settings.benchmarkAdvisorDeployments || '')
     .split(',')
     .map((x) => x.trim())
@@ -2461,6 +2620,7 @@ function percentile(sorted, p) {
 }
 
 async function checkHealth() {
+  if (!canUseDeveloperTools()) return;
   try {
     const response = await fetch('/api/health');
     const data = await safeJson(response);
@@ -2473,6 +2633,7 @@ async function checkHealth() {
 }
 
 function addMetric(text) {
+  if (!canUseDeveloperTools()) return;
   const card = document.createElement('div');
   card.className = 'card';
   card.innerHTML = `<div class="meta"><span>metric</span><span>${new Date().toLocaleTimeString('ja-JP', { hour12: false })}</span></div><div class="body">${escapeHtml(text)}</div>`;
@@ -2481,6 +2642,7 @@ function addMetric(text) {
 }
 
 function logEvent(event) {
+  if (!canUseDeveloperTools()) return;
   const compact = compactEvent(event);
   state.diagnosticEvents.push({
     at: new Date().toISOString(),
@@ -2512,6 +2674,7 @@ function compactEvent(event) {
 }
 
 function exportDiagnosticEvents() {
+  if (!canUseDeveloperTools()) return;
   const lines = state.diagnosticEvents.map((event) => JSON.stringify(event));
   const blob = new Blob([`${lines.join('\n')}\n`], { type: 'application/x-ndjson' });
   const url = URL.createObjectURL(blob);

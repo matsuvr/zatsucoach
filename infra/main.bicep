@@ -52,6 +52,20 @@ param avatarTextDeployment string = 'gpt-5.4-nano'
 @description('Realtime input transcription deployment name.')
 param transcriptionDeployment string = 'gpt-4o-mini-transcribe'
 
+@secure()
+@description('Secret used to sign ZatsuCoach email/password auth session cookies. Use at least 32 random characters.')
+param zatsucoachAuthSecret string = ''
+
+@description('Demo account email address for email/password login.')
+param zatsucoachDemoEmail string = 'demo2026@catkawaii.com'
+
+@secure()
+@description('PBKDF2 password hash for the demo email/password login account.')
+param zatsucoachDemoPasswordHash string = ''
+
+@description('Comma-separated emails that can access developer-only controls.')
+param zatsucoachDeveloperEmails string = 'developer@example.com'
+
 var resourceToken = toLower(uniqueString(resourceGroup().id, environmentName, location))
 var staticWebAppName = 'stapp-zatsucoach-${resourceToken}'
 var storageAccountName = 'stzatsu${take(resourceToken, 17)}'
@@ -137,6 +151,10 @@ resource staticWebAppSettings 'Microsoft.Web/staticSites/config@2022-09-01' = {
     ZATSUCOACH_LOG_STORAGE_CONNECTION_STRING: storageConnectionString
     ZATSUCOACH_LOG_SESSIONS_TABLE: sessionsTable.name
     ZATSUCOACH_LOG_ITEMS_TABLE: itemsTable.name
+    ZATSUCOACH_AUTH_SECRET: zatsucoachAuthSecret
+    ZATSUCOACH_DEMO_EMAIL: zatsucoachDemoEmail
+    ZATSUCOACH_DEMO_PASSWORD_HASH: zatsucoachDemoPasswordHash
+    ZATSUCOACH_DEVELOPER_EMAILS: zatsucoachDeveloperEmails
   }
 }
 

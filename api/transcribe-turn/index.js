@@ -8,6 +8,7 @@ const {
   jsonResponse,
   parseJsonBody
 } = require('../_shared/azureOpenAI');
+const { authenticatedUser } = require('../_shared/appAuth');
 
 const MIME_EXTENSIONS = {
   'audio/webm': 'webm',
@@ -34,6 +35,8 @@ function parseResponseText(text) {
 
 module.exports = async function (context, req) {
   try {
+    authenticatedUser(req);
+
     if (String(process.env.ENABLE_TRANSCRIBE_DIAGNOSTIC || '').toLowerCase() !== 'true') {
       jsonResponse(context, {
         error: 'transcribe-turn is disabled. Set ENABLE_TRANSCRIBE_DIAGNOSTIC=true only for explicit diagnostic smoke tests.'

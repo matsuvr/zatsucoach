@@ -13,6 +13,7 @@
 }
 
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 body {
   margin: 0;
   min-height: 100vh;
@@ -62,6 +63,41 @@ button.small { padding: 0.35rem 0.55rem; font-size: 0.86rem; }
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.loginView {
+  min-height: calc(100vh - 74px);
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+}
+.loginView[hidden] { display: none; }
+.loginPanel {
+  width: min(440px, 100%);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(22, 27, 34, 0.92);
+  padding: 1rem;
+  display: grid;
+  gap: 1rem;
+}
+.loginPanel h1 {
+  margin: 0;
+  font-size: 1.45rem;
+}
+.loginPanel p {
+  margin: 0.35rem 0 0;
+  color: var(--muted);
+  line-height: 1.5;
+}
+.loginMicrosoft { width: 100%; }
+.emailLoginForm {
+  display: grid;
+  gap: 0.85rem;
+}
+.loginError {
+  min-height: 1.2rem;
+  color: var(--danger);
+  font-size: 0.86rem;
 }
 .layout {
   display: grid;

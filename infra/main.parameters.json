@@ -40,6 +40,18 @@
     },
     "transcriptionDeployment": {
       "value": "${TRANSCRIPTION_DEPLOYMENT=gpt-4o-mini-transcribe}"
+    },
+    "zatsucoachAuthSecret": {
+      "value": "${ZATSUCOACH_AUTH_SECRET=}"
+    },
+    "zatsucoachDemoEmail": {
+      "value": "${ZATSUCOACH_DEMO_EMAIL=demo2026@catkawaii.com}"
+    },
+    "zatsucoachDemoPasswordHash": {
+      "value": "${ZATSUCOACH_DEMO_PASSWORD_HASH=}"
+    },
+    "zatsucoachDeveloperEmails": {
+      "value": "${ZATSUCOACH_DEVELOPER_EMAILS=developer@example.com}"
     }
   }
 }

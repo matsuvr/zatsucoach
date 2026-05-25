@@ -2,6 +2,10 @@
 
 const crypto = require('crypto');
 const { TableClient } = require('@azure/data-tables');
+const {
+  HttpError,
+  authenticatedUser
+} = require('./appAuth');
 
 const DEFAULT_SESSIONS_TABLE = 'ZatsucoachSessions';
 const DEFAULT_ITEMS_TABLE = 'ZatsucoachItems';
@@ -12,14 +16,6 @@ const MAX_BATCH_ITEMS = 50;
 
 let sessionsClientPromise = null;
 let itemsClientPromise = null;
-
-class HttpError extends Error {
-  constructor(status, message) {
-    super(message);
-    this.name = 'HttpError';
-    this.status = status;
-  }
-}
 
 function storageConnectionString() {
   return process.env.ZATSUCOACH_LOG_STORAGE_CONNECTION_STRING ||
@@ -76,44 +72,6 @@ function itemsClient() {
 
 function hasLogStorageConfig() {
   return Boolean(storageConnectionString());
-}
-
-function authenticatedUser(req) {
-  const raw = header(req, 'x-ms-client-principal');
-  if (!raw) throw new HttpError(401, 'authentication required');
-
-  let principal = null;
-  try {
-    principal = JSON.parse(Buffer.from(raw, 'base64').toString('utf8'));
-  } catch {
-    throw new HttpError(401, 'invalid authentication principal');
-  }
-
-  const roles = Array.isArray(principal.userRoles) ? principal.userRoles : [];
-  if (!roles.includes('authenticated')) throw new HttpError(401, 'authentication required');
-
-  const provider = cleanText(principal.identityProvider || 'aad', 40);
-  const userId = cleanText(principal.userId || '', 240);
-  if (!userId) throw new HttpError(401, 'authenticated user id is missing');
-
-  const userDetails = cleanText(principal.userDetails || '', 320);
-  return {
-    provider,
-    userId,
-    userDetails,
-    safeUserId: crypto
-      .createHash('sha256')
-      .update(`${provider}:${userId}`)
-      .digest('hex')
-  };
-}
-
-function header(req, name) {
-  const target = name.toLowerCase();
-  for (const [key, value] of Object.entries(req.headers || {})) {
-    if (String(key).toLowerCase() === target) return Array.isArray(value) ? value[0] : value;
-  }
-  return '';
 }
 
 function cleanText(value, maxChars) {
