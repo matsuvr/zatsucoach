@@ -47,7 +47,11 @@ const serverSettingKeys = Object.freeze([
 ]);
 
 const els = {
+  pageLoading: document.getElementById('pageLoading'),
+  pageLoadingText: document.getElementById('pageLoadingText'),
   stage: document.getElementById('vrmStage'),
+  stageLoading: document.getElementById('stageLoading'),
+  stageLoadingText: document.getElementById('stageLoadingText'),
   loginView: document.getElementById('loginView'),
   emailLoginForm: document.getElementById('emailLoginForm'),
   loginEmail: document.getElementById('loginEmail'),
@@ -94,6 +98,10 @@ const state = {
   microphoneEnabled: false,
   activeRealtimeSessionId: 0,
   realtimeStarting: false,
+  connectionLoading: false,
+  connectionLoadingText: '',
+  avatarLoading: true,
+  avatarLoadingText: 'アバターを読み込んでいます',
   expectedRealtimeVoice: '',
   clientSessionUpdateRequired: false,
   realtimeCounters: {
@@ -310,6 +318,7 @@ async function loadAuthState() {
       resetCurrentLogSession();
     }
     if (state.authUser) syncServerSettings();
+    setPageLoading(false);
   }
 }
 
@@ -325,7 +334,7 @@ function renderAuthState() {
   const main = document.querySelector('main.layout');
   if (main) main.hidden = !state.authUser;
   if (state.authUser) scheduleStageResize();
-  if (els.btnConnect) els.btnConnect.disabled = !state.authUser || state.realtimeStarting;
+  if (els.btnConnect) els.btnConnect.disabled = !state.authUser || state.realtimeStarting || state.connectionLoading || Boolean(state.pc || state.dataChannel);
   if (!state.authUser && location.pathname !== '/login') {
     history.replaceState(null, '', '/login');
   } else if (state.authUser && location.pathname === '/login') {
@@ -394,6 +403,46 @@ function renderDeveloperControls() {
 
 function setHidden(el, hidden) {
   if (el) el.hidden = Boolean(hidden);
+}
+
+function setPageLoading(loading, text = 'ページを読み込んでいます') {
+  if (!els.pageLoading) return;
+  if (els.pageLoadingText && text) els.pageLoadingText.textContent = text;
+  els.pageLoading.classList.toggle('is-hidden', !loading);
+  els.pageLoading.setAttribute('aria-hidden', loading ? 'false' : 'true');
+}
+
+function setAvatarLoading(loading, text = '') {
+  state.avatarLoading = Boolean(loading);
+  if (text) state.avatarLoadingText = text;
+  renderStageLoading();
+}
+
+function setConnectionLoading(loading, text = '') {
+  state.connectionLoading = Boolean(loading);
+  if (text) state.connectionLoadingText = text;
+  if (els.btnConnect) {
+    els.btnConnect.classList.toggle('busy', state.connectionLoading);
+    els.btnConnect.textContent = state.connectionLoading ? '接続中' : '接続開始';
+    els.btnConnect.disabled = !state.authUser || state.realtimeStarting || state.connectionLoading || Boolean(state.pc || state.dataChannel);
+  }
+  if (els.connectionStatus) {
+    els.connectionStatus.classList.toggle('busy', state.connectionLoading);
+  }
+  renderStageLoading();
+}
+
+function renderStageLoading() {
+  if (!els.stageLoading) return;
+  const text = state.connectionLoading
+    ? (state.connectionLoadingText || '接続しています')
+    : state.avatarLoading
+      ? (state.avatarLoadingText || 'アバターを読み込んでいます')
+      : '';
+  const visible = Boolean(text);
+  if (els.stageLoadingText && text) els.stageLoadingText.textContent = text;
+  els.stageLoading.classList.toggle('is-hidden', !visible);
+  els.stageLoading.setAttribute('aria-hidden', visible ? 'false' : 'true');
 }
 
 function canUseDeveloperTools() {
@@ -582,6 +631,7 @@ function resizeStageRenderer() {
 }
 
 function loadVRM(url) {
+  setAvatarLoading(true, 'アバターを読み込んでいます');
   els.avatarStatus.textContent = 'avatar: loading VRM';
   const loader = new GLTFLoader();
   loader.register((parser) => new VRMLoaderPlugin(parser));
@@ -601,15 +651,18 @@ function loadVRM(url) {
     if (progress.total) {
       const pct = Math.round((progress.loaded / progress.total) * 100);
       els.avatarStatus.textContent = `avatar: loading ${pct}%`;
+      setAvatarLoading(true, `アバターを読み込んでいます (${pct}%)`);
     }
   }, (error) => {
     console.error(error);
+    setAvatarLoading(false);
     els.avatarStatus.textContent = 'avatar: load failed';
     addAdvice('app', `VRMの読み込みに失敗しました: ${error.message || error}`, 'risk');
   });
 }
 
 function loadVRMA(url, vrm) {
+  setAvatarLoading(true, 'アバターの待機モーションを読み込んでいます');
   els.avatarStatus.textContent = 'avatar: loading animation';
   const loader = new GLTFLoader();
   loader.register((parser) => new VRMAnimationLoaderPlugin(parser));
@@ -626,13 +679,16 @@ function loadVRMA(url, vrm) {
       .play();
     vrm.humanoid?.resetNormalizedPose?.();
     els.avatarStatus.textContent = 'avatar: ready + reading loop';
+    setAvatarLoading(false);
   }, (progress) => {
     if (progress.total) {
       const pct = Math.round((progress.loaded / progress.total) * 100);
       els.avatarStatus.textContent = `avatar: animation ${pct}%`;
+      setAvatarLoading(true, `アバターの待機モーションを読み込んでいます (${pct}%)`);
     }
   }, (error) => {
     console.error(error);
+    setAvatarLoading(false);
     els.avatarStatus.textContent = 'avatar: ready, animation failed';
     addAdvice('app', `VRMAの読み込みに失敗しました: ${error.message || error}`, 'warn');
   });
@@ -737,7 +793,7 @@ function updateVRConversationPanels() {
       height: 0.24,
       fontSize: 46,
       truncate: false,
-      tail: role === 'user' ? 'right' : 'left',
+      tail: role === 'user' ? 'user' : 'avatar',
       background: role === 'user' ? '#b8f20d' : '#f7f8f4',
       color: '#141820'
     });
@@ -796,23 +852,27 @@ function createVRTextPanel(text, options) {
   let ctx = canvas.getContext('2d');
   const paddingX = 78;
   const paddingY = 38;
+  const sideTail = options.tail === 'left' || options.tail === 'right';
+  const bottomTail = options.tail === 'avatar' || options.tail === 'user';
   const tailSize = options.tail === 'none' ? 0 : 54;
+  const bottomTailSize = bottomTail ? tailSize : 0;
   const rectX = options.tail === 'left' ? tailSize : 0;
-  const rectWidth = canvas.width - tailSize;
+  const rectWidth = canvas.width - (sideTail ? tailSize : 0);
   const maxTextWidth = rectWidth - paddingX * 2;
   const lineHeight = options.fontSize * 1.24;
   const maxLines = options.truncate === false ? Infinity : (options.role === 'advice' ? 2 : 3);
 
   ctx.font = `600 ${options.fontSize}px ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif`;
   const lines = wrapCanvasText(ctx, text, maxTextWidth, maxLines, options.truncate !== false);
-  canvas.height = Math.max(minCanvasHeight, Math.ceil(paddingY * 2 + lines.length * lineHeight + 28));
+  const bodyCanvasHeight = Math.max(minCanvasHeight, Math.ceil(paddingY * 2 + lines.length * lineHeight + 28));
+  canvas.height = bodyCanvasHeight + bottomTailSize;
   ctx = canvas.getContext('2d');
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.fillStyle = options.background;
   ctx.shadowColor = 'rgba(0, 0, 0, 0.28)';
   ctx.shadowBlur = 26;
   ctx.shadowOffsetY = 10;
-  drawBubbleShape(ctx, rectX + 8, 8, rectWidth - 16, canvas.height - 24, 42, options.tail, tailSize);
+  drawBubbleShape(ctx, rectX + 8, 8, rectWidth - 16, bodyCanvasHeight - 24, 42, options.tail, tailSize);
   ctx.fill();
 
   ctx.shadowColor = 'transparent';
@@ -823,7 +883,7 @@ function createVRTextPanel(text, options) {
 
   const textCenterX = rectX + rectWidth / 2;
   const textBlockHeight = (lines.length - 1) * lineHeight;
-  const textStartY = paddingY + (canvas.height - paddingY * 2 - textBlockHeight) / 2;
+  const textStartY = paddingY + (bodyCanvasHeight - paddingY * 2 - textBlockHeight) / 2;
   lines.forEach((line, index) => {
     ctx.fillText(line, textCenterX, textStartY + index * lineHeight);
   });
@@ -860,6 +920,15 @@ function drawBubbleShape(ctx, x, y, width, height, radius, tail, tailSize) {
   }
   ctx.lineTo(x + width, y + height - radius);
   ctx.quadraticCurveTo(x + width, y + height, x + width - radius, y + height);
+  if (tail === 'avatar' || tail === 'user') {
+    const baseCenter = tail === 'avatar' ? x + width * 0.72 : x + width * 0.68;
+    const tipX = tail === 'avatar' ? baseCenter + tailSize * 0.42 : baseCenter - tailSize * 0.34;
+    const tipY = y + height + tailSize - 8;
+    const baseHalf = tailSize * 0.48;
+    ctx.lineTo(baseCenter + baseHalf, y + height);
+    ctx.lineTo(tipX, tipY);
+    ctx.lineTo(baseCenter - baseHalf, y + height);
+  }
   ctx.lineTo(x + radius, y + height);
   ctx.quadraticCurveTo(x, y + height, x, y + height - radius);
   if (tail === 'left') {
@@ -1078,11 +1147,13 @@ async function startRealtime() {
   const sessionId = state.activeRealtimeSessionId + 1;
   state.activeRealtimeSessionId = sessionId;
   state.realtimeStarting = true;
+  setConnectionLoading(true, '接続の準備をしています');
   state.expectedRealtimeVoice = String(state.settings.voice || '').trim().toLowerCase();
   state.clientSessionUpdateRequired = false;
   ensureLipSyncAudioContext();
 
   try {
+    setConnectionLoading(true, '接続用トークンを取得しています');
     setConnectionStatus('requesting token');
     els.btnConnect.disabled = true;
     const tokenPayload = {
@@ -1116,6 +1187,7 @@ async function startRealtime() {
     }
     state.clientSessionUpdateRequired = Boolean(tokenData.requiresClientSessionUpdate);
 
+    setConnectionLoading(true, 'マイクの許可を待っています');
     setConnectionStatus('microphone');
     const mediaStream = await navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
@@ -1162,6 +1234,7 @@ async function startRealtime() {
 
     const url = new URL(tokenData.webrtcUrl);
 
+    setConnectionLoading(true, 'Realtime に接続しています');
     setConnectionStatus('sdp exchange');
     const sdpStarted = performance.now();
     state.realtimeCounters.sdpExchanges += 1;
@@ -1188,10 +1261,12 @@ async function startRealtime() {
 
     await pc.setRemoteDescription({ type: 'answer', sdp: answerSdp });
     addMetric(`SDP exchange: ${Math.round(performance.now() - sdpStarted)}ms / deployment=${tokenData.deployment} / voice=${tokenData.voice || state.expectedRealtimeVoice}`);
+    setConnectionLoading(true, '接続の確立を待っています');
     setConnectionStatus('connecting');
     els.btnDisconnect.disabled = false;
   } catch (error) {
     console.error(error);
+    setConnectionLoading(false);
     addAdvice('app', `Realtime接続に失敗しました: ${error.message || error}`, 'risk');
     setConnectionStatus('failed');
     els.btnConnect.disabled = false;
@@ -1204,6 +1279,7 @@ async function startRealtime() {
 function wireDataChannel(dc, sessionId, tokenData) {
   dc.addEventListener('open', () => {
     if (!isActiveRealtimeSession(sessionId)) return;
+    setConnectionLoading(true, '接続設定を確認しています');
     setConnectionStatus('configuring session');
     addAdvice('app', 'Realtime接続を確立しました。サーバー側で固定した音声設定を確認しています。', 'good');
     scheduleRealtimeSessionWatchdog(sessionId);
@@ -1217,6 +1293,7 @@ function wireDataChannel(dc, sessionId, tokenData) {
   dc.addEventListener('close', () => {
     if (!isActiveRealtimeSession(sessionId)) return;
     logEvent({ type: 'client.data_channel_close', sessionId });
+    if (!state.realtimeSessionConfigured) setConnectionLoading(false);
     setConnectionStatus('closed');
   });
   dc.addEventListener('error', (event) => {
@@ -1407,6 +1484,7 @@ function confirmRealtimeSession(event, sessionId, source) {
   if (state.realtimeSessionConfigured) return;
   state.clientSessionUpdateRequired = false;
   state.realtimeSessionConfigured = true;
+  setConnectionLoading(false);
   clearTimeout(state.sessionUpdateWatchdogTimer);
   enableMicrophoneTracks(sessionId);
   setConnectionStatus('connected');
@@ -1952,6 +2030,7 @@ async function stopRealtime(showMessage = true, sessionId = state.activeRealtime
   state.sessionUpdateWatchdogTimer = null;
   state.realtimeSessionConfigured = false;
   state.queuedAdvice = null;
+  setConnectionLoading(false);
   els.btnConnect.disabled = false;
   els.btnDisconnect.disabled = true;
   setConnectionStatus('idle');

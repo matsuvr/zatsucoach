@@ -18,6 +18,11 @@
   </script>
 </head>
 <body>
+  <div id="pageLoading" class="pageLoading" role="status" aria-live="polite">
+    <span class="spinner large" aria-hidden="true"></span>
+    <span id="pageLoadingText">ページを読み込んでいます</span>
+  </div>
+
   <header class="topbar">
     <div>
       <div class="product">ZatsuCoach MVP</div>
@@ -61,6 +66,10 @@
   <main class="layout" hidden>
     <section class="stagePanel">
       <div id="vrmStage" class="stage">
+        <div id="stageLoading" class="stageLoading" role="status" aria-live="polite">
+          <span class="spinner large" aria-hidden="true"></span>
+          <span id="stageLoadingText">アバターを読み込んでいます</span>
+        </div>
         <div id="stageOverlay" class="stageOverlay" aria-hidden="true">
           <div id="stageChatOverlay" class="stageChatOverlay"></div>
           <div id="stageAdviceOverlay" class="stageAdviceOverlay">アドバイス</div>
