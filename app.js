@@ -145,6 +145,7 @@ const state = {
   assistantResponseParts: new Map(),
   assistantResponseTimers: new Map(),
   assistantResponseMeta: new Map(),
+  pendingAssistantResponseUserItems: [],
   activeAssistantAudioResponseIds: new Set(),
   microphoneRestoreTimer: null,
   processedAssistantResponseKeys: new Set(),
@@ -1408,6 +1409,7 @@ async function startRealtime() {
   setConnectionLoading(true, '接続の準備をしています');
   state.expectedRealtimeVoice = String(state.settings.voice || '').trim().toLowerCase();
   state.clientSessionUpdateRequired = false;
+  state.pendingAssistantResponseUserItems = [];
   ensureLipSyncAudioContext();
 
   try {
@@ -1615,6 +1617,9 @@ function handleRealtimeEvent(event, sessionId) {
     case 'input_audio_buffer.committed':
       markUserTurnCommitted(event);
       break;
+    case 'response.created':
+      handleResponseCreated(event);
+      break;
     case 'conversation.item.created':
     case 'conversation.item.added':
     case 'conversation.item.retrieved': {
@@ -1791,6 +1796,10 @@ function startUserTurn(event) {
     perfStartedAt: performance.now(),
     perfStoppedAt: 0,
     transcriptText: previous.transcriptText || '',
+    finalTranscriptText: previous.finalTranscriptText || '',
+    provisionalTranscriptText: previous.provisionalTranscriptText || '',
+    transcriptFinal: Boolean(previous.transcriptFinal),
+    transcriptContentIndex: previous.transcriptContentIndex ?? 0,
     committed: Boolean(previous.committed),
     accepted: false,
     ignored: false,
@@ -1829,6 +1838,10 @@ function ensureUserTurn(itemId) {
     perfStoppedAt: 0,
     approxSpeechMs: 0,
     transcriptText: '',
+    finalTranscriptText: '',
+    provisionalTranscriptText: '',
+    transcriptFinal: false,
+    transcriptContentIndex: 0,
     committed: false,
     accepted: false,
     ignored: false,
@@ -1868,7 +1881,7 @@ function decideUserTurn(itemId, sessionId, reason) {
 }
 
 function userTurnDecision(turn) {
-  const text = String(turn.transcriptText || '').trim();
+  const text = String(turn.transcriptFinal ? turn.finalTranscriptText : turn.transcriptText || '').trim();
   if (hasUsefulTranscript(text)) {
     return { accept: true, reason: 'transcript' };
   }
@@ -1905,9 +1918,11 @@ function acceptUserTurn(turn, sessionId, reason) {
     item_id: turn.itemId,
     reason,
     approxSpeechMs: Number(turn.approxSpeechMs) || 0,
-    transcriptChars: String(turn.transcriptText || '').trim().length
+    transcriptChars: String(turn.transcriptText || '').trim().length,
+    finalTranscriptChars: String(turn.finalTranscriptText || '').trim().length,
+    transcriptFinal: Boolean(turn.transcriptFinal)
   });
-  flushAcceptedUserTranscript(turn);
+  publishFinalUserTranscriptForTurn(turn, sessionId, 'accepted_with_final_transcript');
   sendManualResponseCreate(turn, sessionId, reason);
 }
 
@@ -1928,21 +1943,16 @@ function ignoreUserTurn(turn, sessionId, reason) {
   deleteConversationItem(turn.itemId, sessionId, reason);
 }
 
-function flushAcceptedUserTranscript(turn) {
-  const text = String(turn.transcriptText || '').trim();
-  if (!text) return;
-  completeUserTranscript({
-    item_id: turn.itemId,
-    content_index: 0,
-    transcript: text
-  }, state.activeRealtimeSessionId);
-}
-
 function sendManualResponseCreate(turn, sessionId, reason) {
   if (turn.responseSent || !isActiveRealtimeSession(sessionId) || state.dataChannel?.readyState !== 'open') return;
   turn.responseSent = true;
   state.userTurnByItem.set(turn.itemId, turn);
   state.lastResponseStartedAt = performance.now();
+  state.pendingAssistantResponseUserItems.push({
+    itemId: turn.itemId,
+    perfAt: state.userItemSpeechStoppedAt.get(turn.itemId) || turn.perfStoppedAt || performance.now()
+  });
+  if (state.pendingAssistantResponseUserItems.length > 20) state.pendingAssistantResponseUserItems.shift();
   state.dataChannel.send(JSON.stringify({ type: 'response.create' }));
   logEvent({
     type: 'client.manual_response_create_sent',
@@ -2012,7 +2022,8 @@ function appendUserTranscriptDelta(event) {
   state.userTextByItem.set(key, nextText);
   if (event.item_id && state.userTurnByItem.has(event.item_id)) {
     const turn = ensureUserTurn(event.item_id);
-    turn.transcriptText = nextText.trim();
+    turn.provisionalTranscriptText = nextText.trim();
+    if (!turn.transcriptFinal) turn.transcriptText = turn.provisionalTranscriptText;
     state.userTurnByItem.set(event.item_id, turn);
   }
 }
@@ -2025,28 +2036,81 @@ function completeUserTranscript(event, sessionId = state.activeRealtimeSessionId
   if (!text) return;
   const turn = event.item_id ? state.userTurnByItem.get(event.item_id) : null;
   if (turn) {
+    const provisionalText = String(turn.provisionalTranscriptText || turn.transcriptText || '').trim();
+    turn.finalTranscriptText = text;
     turn.transcriptText = text;
+    turn.provisionalTranscriptText = provisionalText;
+    turn.transcriptFinal = true;
+    turn.transcriptContentIndex = event.content_index ?? 0;
     state.userTurnByItem.set(event.item_id, turn);
     if (turn.ignored) {
-      logEvent({ type: 'client.user_transcript_ignored', item_id: event.item_id || null, textChars: text.length });
+      logEvent({
+        type: 'client.user_transcript_ignored',
+        item_id: event.item_id || null,
+        textChars: text.length,
+        provisionalChars: provisionalText.length
+      });
       return;
     }
     if (!turn.accepted) {
       if (hasUsefulTranscript(text) && turn.perfStoppedAt) {
         decideUserTurn(event.item_id, sessionId, 'transcript_completed');
       }
-      return;
+      const updatedTurn = state.userTurnByItem.get(event.item_id);
+      if (!updatedTurn?.accepted) return;
     }
+    publishFinalUserTranscriptForTurn(state.userTurnByItem.get(event.item_id) || turn, sessionId, 'transcript_completed');
+    return;
   }
+  publishUserTranscript(key, event.item_id || '', text, sessionId, 'transcript_completed');
+}
+
+function publishFinalUserTranscriptForTurn(turn, sessionId, reason) {
+  if (!turn?.itemId || !turn.transcriptFinal) return false;
+  const text = String(turn.finalTranscriptText || turn.transcriptText || '').trim();
+  if (!text) return false;
+  const key = [
+    turn.itemId,
+    turn.transcriptContentIndex ?? 0
+  ].join(':');
+  return publishUserTranscript(key, turn.itemId, text, sessionId, reason, {
+    provisionalChars: String(turn.provisionalTranscriptText || '').trim().length,
+    approxSpeechMs: Number(turn.approxSpeechMs) || 0
+  });
+}
+
+function publishUserTranscript(key, itemId, text, sessionId, reason, diagnostics = {}) {
+  if (state.processedUserTranscriptKeys.has(key)) return true;
   state.processedUserTranscriptKeys.add(key);
   if (state.processedUserTranscriptKeys.size > 120) {
     state.processedUserTranscriptKeys = new Set(Array.from(state.processedUserTranscriptKeys).slice(-60));
   }
   addTranscript('user', text, {
-    perfAt: state.userItemSpeechStoppedAt.get(event.item_id) || performance.now(),
-    sourceId: event.item_id || ''
+    perfAt: state.userItemSpeechStoppedAt.get(itemId) || performance.now(),
+    sourceId: itemId || ''
   });
-  logEvent({ type: 'client.user_transcript_added', item_id: event.item_id || null, textChars: text.length });
+  logEvent({
+    type: 'client.user_transcript_added',
+    sessionId,
+    item_id: itemId || null,
+    reason,
+    textChars: text.length,
+    finalChars: text.length,
+    provisionalChars: Number(diagnostics.provisionalChars) || 0,
+    approxSpeechMs: Number(diagnostics.approxSpeechMs) || 0
+  });
+  return true;
+}
+
+function handleResponseCreated(event) {
+  const responseId = event.response?.id || event.response_id;
+  if (!responseId) return;
+  const pending = state.pendingAssistantResponseUserItems.shift() || {};
+  updateAssistantResponseMeta(responseId, {
+    userItemId: pending.itemId || '',
+    userPerfAt: Number(pending.perfAt) || state.lastSpeechStoppedAt || 0,
+    responseCreatedAt: performance.now()
+  });
 }
 
 function recordAssistantResponsePart(event, contentKey, text) {
@@ -2090,7 +2154,33 @@ function scheduleAssistantResponseFlush(responseId, sessionId, delayMs, reason =
 function flushAssistantResponse(responseId, sessionId, reason) {
   if (!responseId || state.processedAssistantResponses.has(responseId)) return;
   const parts = state.assistantResponseParts.get(responseId);
-  if (!parts?.size) return;
+  const meta = state.assistantResponseMeta.get(responseId) || {};
+  if (!parts?.size) {
+    const incompleteReason = assistantIncompleteReason(meta);
+    if (incompleteReason) {
+      clearTimeout(state.assistantResponseTimers.get(responseId));
+      state.assistantResponseTimers.delete(responseId);
+      state.assistantResponseMeta.delete(responseId);
+      state.processedAssistantResponses.add(responseId);
+      logEvent({
+        type: 'client.assistant_response_flushed',
+        sessionId,
+        responseId,
+        reason,
+        status: meta.status || 'unknown',
+        statusDetails: summarizeStatusDetails(meta.statusDetails),
+        usage: summarizeUsage(meta.usage),
+        incompleteReason,
+        parts: 0,
+        textChars: 0,
+        userItemId: meta.userItemId || null,
+        userPerfAt: Number(meta.userPerfAt) || null
+      });
+      addMetric(`Realtime incomplete response: ${incompleteReason}`);
+      addAdvice('app', `Realtime応答が途中終了しました: ${incompleteReason}`, 'warn');
+    }
+    return;
+  }
 
   clearTimeout(state.assistantResponseTimers.get(responseId));
   state.assistantResponseTimers.delete(responseId);
@@ -2099,7 +2189,6 @@ function flushAssistantResponse(responseId, sessionId, reason) {
   if (state.processedAssistantResponses.size > 80) {
     state.processedAssistantResponses = new Set(Array.from(state.processedAssistantResponses).slice(-40));
   }
-  const meta = state.assistantResponseMeta.get(responseId) || {};
   state.assistantResponseMeta.delete(responseId);
 
   const text = Array.from(parts.values())
@@ -2124,13 +2213,20 @@ function flushAssistantResponse(responseId, sessionId, reason) {
     usage: summarizeUsage(meta.usage),
     incompleteReason,
     parts: parts.size,
-    textChars: text.length
+    textChars: text.length,
+    userItemId: meta.userItemId || null,
+    userPerfAt: Number(meta.userPerfAt) || null
   });
   if (incompleteReason) {
     addMetric(`Realtime incomplete response: ${incompleteReason}`);
+    addAdvice('app', `Realtime応答が途中終了しました: ${incompleteReason}`, 'warn');
     return;
   }
-  scheduleAdvisorFromRealtimeResponse(sessionId, responseId, text, { incompleteReason });
+  scheduleAdvisorFromRealtimeResponse(sessionId, responseId, text, {
+    incompleteReason,
+    userItemId: meta.userItemId || '',
+    userPerfAt: Number(meta.userPerfAt) || 0
+  });
 }
 
 function assistantIncompleteReason(meta) {
@@ -2163,18 +2259,46 @@ function summarizeUsage(usage) {
 }
 
 function scheduleAdvisorFromRealtimeResponse(sessionId, responseId, assistantText, diagnostics = {}) {
-  const speechStoppedAt = state.lastSpeechStoppedAt;
+  const speechStoppedAt = Number(diagnostics.userPerfAt) || state.lastSpeechStoppedAt;
+  const userItemId = String(diagnostics.userItemId || '');
   setTimeout(() => {
     if (!isActiveRealtimeSession(sessionId)) return;
-    const latestUser = latestTranscriptByRole('user', speechStoppedAt);
+    const latestUser = userItemId
+      ? transcriptBySourceId('user', userItemId)
+      : latestTranscriptByRole('user', speechStoppedAt);
     if (latestUser) {
-      requestAdvisor('user', latestUser.text, { sessionId, source: 'realtime_user_transcript', responseId, diagnostics });
+      requestAdvisor('user', latestUser.text, {
+        sessionId,
+        source: 'realtime_user_transcript_final',
+        responseId,
+        diagnostics: {
+          ...diagnostics,
+          latestUserItemId: latestUser.sourceId || ''
+        }
+      });
     } else if (diagnostics.incompleteReason) {
       logEvent({ type: 'client.advisor_skipped', sessionId, reason: 'incomplete_assistant_response', responseId, incompleteReason: diagnostics.incompleteReason });
+    } else if (userItemId) {
+      logEvent({
+        type: 'client.advisor_skipped',
+        sessionId,
+        reason: 'final_user_transcript_unavailable',
+        responseId,
+        userItemId
+      });
     } else {
       requestAdvisor('assistant', `Realtimeアバター応答: ${assistantText}`, { sessionId, source: 'realtime_response_transcript', responseId, diagnostics });
     }
   }, ADVISOR_TRANSCRIPT_GRACE_MS);
+}
+
+function transcriptBySourceId(role, sourceId) {
+  if (!sourceId) return null;
+  for (let i = state.transcript.length - 1; i >= 0; i -= 1) {
+    const item = state.transcript[i];
+    if (item?.role === role && item?.sourceId === sourceId && item.text) return item;
+  }
+  return null;
 }
 
 function latestTranscriptByRole(role, minPerfAt = 0) {
@@ -2270,6 +2394,7 @@ async function stopRealtime(showMessage = true, sessionId = state.activeRealtime
   state.assistantResponseTimers.clear();
   state.assistantResponseParts.clear();
   state.assistantResponseMeta.clear();
+  state.pendingAssistantResponseUserItems = [];
   state.activeAssistantAudioResponseIds.clear();
   state.processedAssistantResponseKeys.clear();
   state.processedAssistantResponses.clear();
