@@ -37,6 +37,22 @@ const STAGE_ADVICE_TEXT_LIMIT = 96;
 const LOG_FLUSH_DELAY_MS = 900;
 const AVATAR_VRM_URL = './assets/8590256991748008892.vrm';
 const AVATAR_VRMA_URL = './assets/relaxed_stand_idle_1s_skeleton_only_human_breath.vrma';
+const OFFICE_BACKGROUND_URL = './assets/minimal_office_background_v2.glb';
+const STAGE_CAMERA_FOV = 30;
+const STAGE_CAMERA_POSITION = Object.freeze({ x: 0, y: 1.35, z: 3.1 });
+const STAGE_CAMERA_TARGET = Object.freeze({ x: 0, y: 1.25, z: 0 });
+const AVATAR_STAGE_POSITION = Object.freeze({ x: 0, y: 0, z: 0 });
+const OFFICE_BACKGROUND_POSITION = Object.freeze({ x: 0, y: 0, z: -0.55 });
+const OFFICE_BACKGROUND_SCALE = 1;
+const STAGE_BUBBLE_DEFAULT_MAX_PX = 520;
+const STAGE_BUBBLE_MIN_PX = 72;
+const STAGE_BUBBLE_AVATAR_GAP_PX = 22;
+const STAGE_BUBBLE_EDGE_INSET_PX = 26;
+const VR_AVATAR_BUBBLE_DEFAULT_WIDTH = 0.82;
+const VR_AVATAR_BUBBLE_MIN_WIDTH = 0.34;
+const VR_AVATAR_BUBBLE_DEFAULT_X = -0.82;
+const VR_AVATAR_BUBBLE_DEFAULT_Z = 0.06;
+const VR_FACE_RAY_CLEARANCE = 0.16;
 const DEVELOPER_ACCOUNT_EMAILS = Object.freeze(['developer@example.com']);
 const DEVELOPER_ONLY_TABS = Object.freeze(['metrics', 'events']);
 
@@ -160,17 +176,24 @@ const sceneState = {
   renderer: null,
   scene: null,
   camera: null,
+  cameraRig: null,
   controls: null,
   resizeObserver: null,
   frontKeyLight: null,
+  fallbackFloor: null,
+  officeBackground: null,
   vrConversationGroup: null,
   vrHudGroup: null,
   vrConversationMeshes: [],
   vrAdviceMesh: null,
   latestVRAdviceText: 'アドバイス',
+  initialBubbleLayoutReady: false,
+  vrAvatarBubbleWidth: VR_AVATAR_BUBBLE_DEFAULT_WIDTH,
+  vrAvatarBubbleX: VR_AVATAR_BUBBLE_DEFAULT_X,
   vrm: null,
   animationMixer: null,
   clock: new THREE.Clock(),
+  cameraWorldPosition: new THREE.Vector3(),
   blinkTimer: 0.4 + Math.random() * 1.6,
   blinkProgress: 0,
   blinkDuration: 0.12,
@@ -566,8 +589,13 @@ function initScene() {
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(0x10151f);
 
-  const camera = new THREE.PerspectiveCamera(30, 1, 0.1, 100);
-  camera.position.set(0, 1.35, 3.1);
+  const cameraRig = new THREE.Group();
+  cameraRig.name = 'stageCameraRig';
+  scene.add(cameraRig);
+
+  const camera = new THREE.PerspectiveCamera(STAGE_CAMERA_FOV, 1, 0.1, 100);
+  resetStageCamera(camera, cameraRig);
+  cameraRig.add(camera);
 
   const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -575,14 +603,19 @@ function initScene() {
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.08;
   renderer.xr.enabled = true;
+  renderer.xr.setReferenceSpaceType('local-floor');
   els.stage.appendChild(renderer.domElement);
-  els.stage.appendChild(VRButton.createButton(renderer));
+  const vrButton = VRButton.createButton(renderer);
+  vrButton.classList.add('stageVrButton');
+  els.stage.appendChild(vrButton);
 
   const controls = new OrbitControls(camera, renderer.domElement);
-  controls.target.set(0, 1.25, 0);
+  controls.target.set(STAGE_CAMERA_TARGET.x, STAGE_CAMERA_TARGET.y, STAGE_CAMERA_TARGET.z);
   controls.enableDamping = true;
   controls.minDistance = 1.5;
   controls.maxDistance = 6;
+  renderer.xr.addEventListener('sessionstart', handleXRSessionStart);
+  renderer.xr.addEventListener('sessionend', handleXRSessionEnd);
 
   setupAvatarLighting(scene, camera);
 
@@ -596,9 +629,12 @@ function initScene() {
 
   sceneState.scene = scene;
   sceneState.camera = camera;
+  sceneState.cameraRig = cameraRig;
   sceneState.renderer = renderer;
   sceneState.controls = controls;
+  sceneState.fallbackFloor = floor;
   setupVRTextPanels(scene, camera);
+  loadOfficeBackground(OFFICE_BACKGROUND_URL, floor);
 
   window.addEventListener('resize', resizeStageRenderer);
   if ('ResizeObserver' in window) {
@@ -611,9 +647,47 @@ function initScene() {
   renderer.setAnimationLoop(renderLoop);
 }
 
+function resetStageCamera(camera, cameraRig) {
+  if (cameraRig) {
+    cameraRig.position.set(0, 0, 0);
+    cameraRig.rotation.set(0, 0, 0);
+    cameraRig.scale.set(1, 1, 1);
+    cameraRig.updateMatrixWorld(true);
+  }
+  camera.fov = STAGE_CAMERA_FOV;
+  camera.near = 0.1;
+  camera.far = 100;
+  camera.position.set(STAGE_CAMERA_POSITION.x, STAGE_CAMERA_POSITION.y, STAGE_CAMERA_POSITION.z);
+  camera.up.set(0, 1, 0);
+  camera.lookAt(STAGE_CAMERA_TARGET.x, STAGE_CAMERA_TARGET.y, STAGE_CAMERA_TARGET.z);
+  camera.updateProjectionMatrix();
+  camera.updateMatrixWorld(true);
+}
+
+function handleXRSessionStart() {
+  if (sceneState.controls) sceneState.controls.enabled = false;
+  if (!sceneState.cameraRig) return;
+  sceneState.cameraRig.position.set(STAGE_CAMERA_POSITION.x, 0, STAGE_CAMERA_POSITION.z);
+  sceneState.cameraRig.rotation.set(0, 0, 0);
+  sceneState.cameraRig.scale.set(1, 1, 1);
+  sceneState.cameraRig.updateMatrixWorld(true);
+}
+
+function handleXRSessionEnd() {
+  if (!sceneState.camera) return;
+  resetStageCamera(sceneState.camera, sceneState.cameraRig);
+  if (sceneState.controls) {
+    sceneState.controls.enabled = true;
+    sceneState.controls.target.set(STAGE_CAMERA_TARGET.x, STAGE_CAMERA_TARGET.y, STAGE_CAMERA_TARGET.z);
+    sceneState.controls.update();
+  }
+  resizeStageRenderer();
+}
+
 function scheduleStageResize() {
   requestAnimationFrame(() => {
     resizeStageRenderer();
+    scheduleInitialBubbleLayout();
     requestAnimationFrame(resizeStageRenderer);
   });
 }
@@ -628,6 +702,183 @@ function resizeStageRenderer() {
   sceneState.renderer.setSize(width, height, false);
   sceneState.camera.aspect = Math.max(width / height, 0.1);
   sceneState.camera.updateProjectionMatrix();
+  scheduleInitialBubbleLayout();
+}
+
+function scheduleInitialBubbleLayout() {
+  if (sceneState.initialBubbleLayoutReady) return;
+  requestAnimationFrame(applyInitialBubbleLayout);
+}
+
+function applyInitialBubbleLayout() {
+  if (sceneState.initialBubbleLayoutReady) return;
+  if (!els.stage || !sceneState.vrm?.scene || !sceneState.camera) return;
+
+  const stageRect = els.stage.getBoundingClientRect();
+  if (stageRect.width <= 0 || stageRect.height <= 0) return;
+
+  sceneState.camera.updateMatrixWorld(true);
+  sceneState.vrm.scene.updateMatrixWorld(true);
+  const avatarRect = projectBoxToStage(getAvatarFaceProtectionBox(), sceneState.camera, stageRect);
+  if (!avatarRect) return;
+
+  const assistantMaxWidth = calculateStageBubbleMaxWidth(avatarRect.left - STAGE_BUBBLE_AVATAR_GAP_PX - STAGE_BUBBLE_EDGE_INSET_PX);
+  const userMaxWidth = calculateStageBubbleMaxWidth(stageRect.width - avatarRect.right - STAGE_BUBBLE_AVATAR_GAP_PX - STAGE_BUBBLE_EDGE_INSET_PX);
+  els.stage.style.setProperty('--stage-assistant-bubble-max-width', `${assistantMaxWidth}px`);
+  els.stage.style.setProperty('--stage-user-bubble-max-width', `${userMaxWidth}px`);
+
+  const vrLayout = calculateInitialVRAvatarBubbleLayout();
+  sceneState.vrAvatarBubbleWidth = vrLayout.width;
+  sceneState.vrAvatarBubbleX = vrLayout.x;
+  sceneState.initialBubbleLayoutReady = true;
+  updateVRConversationPanels();
+}
+
+function calculateStageBubbleMaxWidth(availableWidth) {
+  return Math.max(
+    STAGE_BUBBLE_MIN_PX,
+    Math.min(STAGE_BUBBLE_DEFAULT_MAX_PX, Math.floor(availableWidth))
+  );
+}
+
+function projectBoxToStage(box, camera, stageRect) {
+  if (!Number.isFinite(box.min.x) || box.isEmpty()) return null;
+
+  const corners = [
+    new THREE.Vector3(box.min.x, box.min.y, box.min.z),
+    new THREE.Vector3(box.min.x, box.min.y, box.max.z),
+    new THREE.Vector3(box.min.x, box.max.y, box.min.z),
+    new THREE.Vector3(box.min.x, box.max.y, box.max.z),
+    new THREE.Vector3(box.max.x, box.min.y, box.min.z),
+    new THREE.Vector3(box.max.x, box.min.y, box.max.z),
+    new THREE.Vector3(box.max.x, box.max.y, box.min.z),
+    new THREE.Vector3(box.max.x, box.max.y, box.max.z)
+  ];
+
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const corner of corners) {
+    corner.project(camera);
+    if (!Number.isFinite(corner.x) || !Number.isFinite(corner.y) || !Number.isFinite(corner.z)) continue;
+    const x = (corner.x * 0.5 + 0.5) * stageRect.width;
+    const y = (-corner.y * 0.5 + 0.5) * stageRect.height;
+    minX = Math.min(minX, x);
+    minY = Math.min(minY, y);
+    maxX = Math.max(maxX, x);
+    maxY = Math.max(maxY, y);
+  }
+  if (!Number.isFinite(minX) || !Number.isFinite(maxX)) return null;
+
+  return {
+    left: Math.max(0, minX),
+    top: Math.max(0, minY),
+    right: Math.min(stageRect.width, maxX),
+    bottom: Math.min(stageRect.height, maxY)
+  };
+}
+
+function getAvatarFaceProtectionBox() {
+  const avatarBox = new THREE.Box3().setFromObject(sceneState.vrm.scene);
+  if (!Number.isFinite(avatarBox.min.x) || avatarBox.isEmpty()) return avatarBox;
+
+  const avatarSize = new THREE.Vector3();
+  avatarBox.getSize(avatarSize);
+  const center = getAvatarFacePoint();
+  const halfX = Math.max(avatarSize.y * 0.09, 0.14);
+  const halfY = Math.max(avatarSize.y * 0.11, 0.16);
+  const halfZ = Math.max(avatarSize.y * 0.07, 0.1);
+  return new THREE.Box3(
+    new THREE.Vector3(center.x - halfX, center.y - halfY, center.z - halfZ),
+    new THREE.Vector3(center.x + halfX, center.y + halfY, center.z + halfZ)
+  );
+}
+
+function calculateInitialVRAvatarBubbleLayout() {
+  const facePoint = getAvatarFacePoint();
+  const cameraPoint = new THREE.Vector3(STAGE_CAMERA_POSITION.x, STAGE_CAMERA_POSITION.y, STAGE_CAMERA_POSITION.z);
+  const rayDirection = facePoint.clone().sub(cameraPoint);
+  const rayLengthSq = rayDirection.lengthSq();
+  if (rayLengthSq <= 0.0001) {
+    return { width: VR_AVATAR_BUBBLE_DEFAULT_WIDTH, x: VR_AVATAR_BUBBLE_DEFAULT_X };
+  }
+
+  const targetZ = VR_AVATAR_BUBBLE_DEFAULT_Z;
+  const t = Math.abs(rayDirection.z) > 0.0001
+    ? Math.max(0, Math.min(1, (targetZ - cameraPoint.z) / rayDirection.z))
+    : 1;
+  const rayXAtBubbleDepth = cameraPoint.x + rayDirection.x * t;
+  const maxWidthBeforeRay = Math.max(
+    VR_AVATAR_BUBBLE_MIN_WIDTH,
+    (rayXAtBubbleDepth - VR_FACE_RAY_CLEARANCE - VR_AVATAR_BUBBLE_DEFAULT_X) * 2
+  );
+  const width = Math.min(VR_AVATAR_BUBBLE_DEFAULT_WIDTH, maxWidthBeforeRay);
+  const maxCenterX = rayXAtBubbleDepth - VR_FACE_RAY_CLEARANCE - width / 2;
+  const x = Math.min(VR_AVATAR_BUBBLE_DEFAULT_X, maxCenterX);
+  return { width, x };
+}
+
+function getAvatarFacePoint() {
+  const head = sceneState.vrm?.humanoid?.getNormalizedBoneNode?.('head')
+    || sceneState.vrm?.humanoid?.getRawBoneNode?.('head');
+  if (head) {
+    const point = new THREE.Vector3();
+    head.getWorldPosition(point);
+    point.y += 0.06;
+    return point;
+  }
+
+  const box = new THREE.Box3().setFromObject(sceneState.vrm.scene);
+  const center = new THREE.Vector3();
+  box.getCenter(center);
+  center.y = box.min.y + (box.max.y - box.min.y) * 0.82;
+  return center;
+}
+
+function loadOfficeBackground(url, fallbackFloor) {
+  const loader = new GLTFLoader();
+  loader.load(url, (gltf) => {
+    const background = gltf.scene;
+    background.name = 'minimalOfficeBackground';
+    background.scale.setScalar(OFFICE_BACKGROUND_SCALE);
+    background.position.set(
+      OFFICE_BACKGROUND_POSITION.x,
+      OFFICE_BACKGROUND_POSITION.y,
+      OFFICE_BACKGROUND_POSITION.z
+    );
+    tuneOfficeBackground(background);
+    alignOfficeBackgroundFloor(background);
+    sceneState.scene.add(background);
+    sceneState.officeBackground = background;
+    if (fallbackFloor) fallbackFloor.visible = false;
+  }, undefined, (error) => {
+    console.warn('Office background load failed:', error);
+  });
+}
+
+function alignOfficeBackgroundFloor(background) {
+  background.updateMatrixWorld(true);
+  const floor = background.getObjectByName('floor');
+  if (!floor) return;
+  const floorBox = new THREE.Box3().setFromObject(floor);
+  if (!Number.isFinite(floorBox.max.y)) return;
+  background.position.y += AVATAR_STAGE_POSITION.y - floorBox.max.y;
+  background.updateMatrixWorld(true);
+}
+
+function tuneOfficeBackground(root) {
+  root.traverse((object) => {
+    if (!object.isMesh) return;
+    object.frustumCulled = false;
+    const materials = Array.isArray(object.material) ? object.material : [object.material];
+    for (const material of materials) {
+      if (!material) continue;
+      if ('roughness' in material) material.roughness = Math.max(material.roughness ?? 0.75, 0.82);
+      if ('metalness' in material) material.metalness = 0;
+      material.needsUpdate = true;
+    }
+  });
 }
 
 function loadVRM(url) {
@@ -644,6 +895,7 @@ function loadVRM(url) {
     tuneAvatarMaterials(vrm.scene);
     fitVRM(vrm);
     addLookAtProxy(vrm);
+    scheduleInitialBubbleLayout();
     els.avatarStatus.textContent = 'avatar: ready';
     setAvatarMood('neutral');
     loadVRMA(AVATAR_VRMA_URL, vrm);
@@ -702,7 +954,7 @@ function addLookAtProxy(vrm) {
 }
 
 function setupAvatarLighting(scene, camera) {
-  scene.add(camera);
+  if (!camera.parent) scene.add(camera);
 
   const hemi = new THREE.HemisphereLight(0xf7f0ff, 0x243045, 0.48);
   scene.add(hemi);
@@ -728,7 +980,8 @@ function setupAvatarLighting(scene, camera) {
 
 function syncCameraLighting() {
   if (!sceneState.frontKeyLight || !sceneState.camera) return;
-  sceneState.frontKeyLight.position.copy(sceneState.camera.position);
+  sceneState.camera.getWorldPosition(sceneState.cameraWorldPosition);
+  sceneState.frontKeyLight.position.copy(sceneState.cameraWorldPosition);
 }
 
 function tuneAvatarMaterials(root) {
@@ -752,14 +1005,18 @@ function tuneAvatarMaterials(root) {
 function fitVRM(vrm) {
   const box = new THREE.Box3().setFromObject(vrm.scene);
   const size = new THREE.Vector3();
-  const center = new THREE.Vector3();
   box.getSize(size);
-  box.getCenter(center);
-  vrm.scene.position.x -= center.x;
-  vrm.scene.position.z -= center.z;
-  vrm.scene.position.y -= box.min.y;
   const scale = 1.6 / Math.max(size.y, 0.1);
   vrm.scene.scale.setScalar(scale);
+  vrm.scene.updateMatrixWorld(true);
+
+  const scaledBox = new THREE.Box3().setFromObject(vrm.scene);
+  const center = new THREE.Vector3();
+  scaledBox.getCenter(center);
+  vrm.scene.position.x += AVATAR_STAGE_POSITION.x - center.x;
+  vrm.scene.position.y += AVATAR_STAGE_POSITION.y - scaledBox.min.y;
+  vrm.scene.position.z += AVATAR_STAGE_POSITION.z - center.z;
+  vrm.scene.updateMatrixWorld(true);
 }
 
 function setupVRTextPanels(scene, camera) {
@@ -787,9 +1044,10 @@ function updateVRConversationPanels() {
   let userRow = 0;
   for (const item of state.transcript.slice(-STAGE_TRANSCRIPT_LIMIT)) {
     const role = item.role === 'user' ? 'user' : 'assistant';
+    const avatarBubbleWidth = sceneState.vrAvatarBubbleWidth || VR_AVATAR_BUBBLE_DEFAULT_WIDTH;
     const mesh = createVRTextPanel(normalizeStageText(item.text), {
       role,
-      width: 0.82,
+      width: role === 'user' ? 0.82 : avatarBubbleWidth,
       height: 0.24,
       fontSize: 46,
       truncate: false,
@@ -804,7 +1062,7 @@ function updateVRConversationPanels() {
       sceneState.vrHudGroup.add(mesh);
       userRow += 1;
     } else {
-      mesh.position.set(-0.82, 1.72 - avatarRow * 0.28, 0.06);
+      mesh.position.set(sceneState.vrAvatarBubbleX || VR_AVATAR_BUBBLE_DEFAULT_X, 1.72 - avatarRow * 0.28, VR_AVATAR_BUBBLE_DEFAULT_Z);
       mesh.userData.billboardToCamera = true;
       sceneState.vrConversationGroup.add(mesh);
       avatarRow += 1;

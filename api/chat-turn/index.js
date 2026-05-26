@@ -7,7 +7,10 @@ const {
   chatCompletion,
   extractChatText,
   clampNumber,
-  buildChatMessages
+  buildChatMessages,
+  advisorEndpointBase,
+  advisorEndpointRoute,
+  advisorApiKey
 } = require('../_shared/azureOpenAI');
 const { authenticatedUser } = require('../_shared/appAuth');
 
@@ -33,7 +36,10 @@ module.exports = async function (context, req) {
       maxTokens,
       temperature: 0.65,
       reasoningEffort: body.reasoningEffort || 'none',
-      timeoutMs: 20000
+      timeoutMs: 20000,
+      endpoint: advisorEndpointBase(),
+      apiKey: advisorApiKey(),
+      routeHint: advisorEndpointRoute()
     });
 
     jsonResponse(context, {

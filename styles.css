@@ -169,6 +169,31 @@ button.busy::before {
   overflow: hidden;
 }
 .stage canvas { display: block; width: 100%; height: 100%; }
+.stage .stageVrButton {
+  position: absolute !important;
+  top: 0.75rem !important;
+  right: 0.75rem !important;
+  bottom: auto !important;
+  left: auto !important;
+  z-index: 4 !important;
+  width: auto !important;
+  min-width: 7.6rem !important;
+  max-width: calc(100% - 1.5rem) !important;
+  height: 2.35rem !important;
+  margin: 0 !important;
+  padding: 0.4rem 0.75rem !important;
+  border: 1px solid rgba(230, 237, 243, 0.2) !important;
+  border-radius: 0.65rem !important;
+  background: rgba(13, 17, 23, 0.72) !important;
+  color: var(--text) !important;
+  font: inherit !important;
+  font-size: 0.78rem !important;
+  line-height: 1.2 !important;
+  letter-spacing: 0 !important;
+  opacity: 0.88 !important;
+  box-shadow: none !important;
+  transform: none !important;
+}
 .stageLoading {
   position: absolute;
   inset: 0;
@@ -210,7 +235,7 @@ button.busy::before {
   position: relative;
   width: fit-content;
   max-width: min(62%, 520px);
-  min-width: 5.25rem;
+  min-width: min(5.25rem, var(--stage-current-bubble-max-width, 5.25rem));
   border-radius: 0.78rem;
   padding: 0.7rem 0.85rem;
   color: #12161f;
@@ -226,7 +251,9 @@ button.busy::before {
   border: 0.42rem solid transparent;
 }
 .stageTranscriptBubble.assistant {
+  --stage-current-bubble-max-width: var(--stage-assistant-bubble-max-width, min(62%, 520px));
   align-self: flex-start;
+  max-width: var(--stage-current-bubble-max-width);
   margin-left: 0.35rem;
   background: #f7f8f4;
 }
@@ -238,7 +265,9 @@ button.busy::before {
   transform-origin: 50% 0;
 }
 .stageTranscriptBubble.user {
+  --stage-current-bubble-max-width: var(--stage-user-bubble-max-width, min(62%, 520px));
   align-self: flex-end;
+  max-width: var(--stage-current-bubble-max-width);
   margin-right: 0.35rem;
   background: #b8f20d;
 }
