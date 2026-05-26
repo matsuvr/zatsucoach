@@ -156,6 +156,47 @@ test('assistant transcript flushes once and schedules one advisor request', () =
   assert.equal(h.byType('logEvent').some((effect) => effect.event.reason === 'duplicate_done'), true);
 });
 
+test('avatar audio does not disable microphone capture', () => {
+  const h = createHarness();
+  h.begin();
+  h.effects.length = 0;
+
+  h.engine.handleServerEvent({ type: 'response.created', response: { id: 'r1' } });
+  h.engine.handleServerEvent({ type: 'output_audio_buffer.started', response_id: 'r1' });
+
+  assert.equal(h.byType('setMicrophoneEnabled').some((effect) => effect.enabled === false), false);
+  assert.equal(h.byType('setAvatarSpeaking').at(-1).speaking, true);
+});
+
+test('overlapped user speech is transcribed while avatar response continues', () => {
+  const h = createHarness();
+  h.begin();
+  h.effects.length = 0;
+
+  h.engine.handleServerEvent({ type: 'response.created', response: { id: 'r1' } });
+  h.engine.handleServerEvent({ type: 'output_audio_buffer.started', response_id: 'r1' });
+  h.advance(100);
+  h.engine.handleServerEvent({ type: 'input_audio_buffer.speech_started', item_id: 'u1', audio_start_ms: 0 });
+  h.advance(300);
+  h.engine.handleServerEvent({ type: 'input_audio_buffer.speech_stopped', item_id: 'u1', audio_end_ms: 1300 });
+  h.engine.handleServerEvent({
+    type: 'conversation.item.input_audio_transcription.completed',
+    item_id: 'u1',
+    content_index: 0,
+    transcript: 'それ気になります'
+  });
+
+  assert.equal(h.byType('addTranscript').filter((effect) => effect.role === 'user').length, 1);
+  assert.equal(h.byType('addTranscript').find((effect) => effect.role === 'user').options.avatarOverlapMs, 300);
+  assert.equal(h.byType('logEvent').some((effect) => effect.event.type === 'client.manual_response_create_deferred'), true);
+  assert.equal(h.sentEvents('response.create').length, 0);
+
+  h.engine.handleServerEvent({ type: 'response.done', response: { id: 'r1', status: 'completed' } });
+  h.engine.handleServerEvent({ type: 'output_audio_buffer.stopped', response_id: 'r1' });
+
+  assert.equal(h.sentEvents('response.create').length, 1);
+});
+
 test('incomplete response warns and does not schedule advisor', () => {
   const h = createHarness();
   h.begin();

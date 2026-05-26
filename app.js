@@ -24,6 +24,7 @@ const ADVISOR_TRANSCRIPT_GRACE_MS = 1200;
 const DIAGNOSTIC_LOG_LIMIT = 1000;
 const DEVELOPER_ACCOUNT_EMAILS = Object.freeze(['developer@example.com']);
 const DEVELOPER_ONLY_TABS = Object.freeze(['metrics', 'events']);
+const PUBLIC_PERIOD_ENDED_MESSAGE = '公開期間を終了しました';
 
 const serverSettingKeys = Object.freeze([
   'realtimeDeployment',
@@ -42,6 +43,7 @@ const els = {
   loginEmail: document.getElementById('loginEmail'),
   loginPassword: document.getElementById('loginPassword'),
   loginError: document.getElementById('loginError'),
+  publicClosedNotice: document.getElementById('publicClosedNotice'),
   accountStatus: document.getElementById('accountStatus'),
   connectionStatus: document.getElementById('connectionStatus'),
   avatarStatus: document.getElementById('avatarStatus'),
@@ -94,6 +96,13 @@ const state = {
   },
   authUser: null,
   authChecked: false,
+  publicAccess: {
+    ended: false,
+    exempt: false,
+    canUseInteractiveFeatures: true,
+    logAccess: 'none',
+    message: ''
+  },
   developerToolsEnabled: false,
   selectedSavedSessionId: '',
   transcript: [],
@@ -114,7 +123,9 @@ const avatarStage = createAvatarStage({
     stageAdviceOverlay: els.stageAdviceOverlay
   },
   onAdvice: addAdvice,
-  onLoadingChange: setAvatarLoading
+  onLoadingChange: setAvatarLoading,
+  onVRSessionRequested: ensureRealtimeForVR,
+  onVRSessionStart: ensureRealtimeForVR
 });
 
 const realtimeEngine = createRealtimeConversationEngine({
@@ -123,7 +134,7 @@ const realtimeEngine = createRealtimeConversationEngine({
 });
 
 const conversationLog = createConversationLogClient({
-  canPersist: () => Boolean(state.authUser),
+  canPersist: () => canWriteLogs(),
   getTranscript: () => state.transcript,
   summarizeTitle: compactStageText,
   onError: (event) => logEvent(event)
@@ -262,8 +273,10 @@ async function loadAuthState() {
     const principal = data?.clientPrincipal || null;
     const roles = Array.isArray(principal?.userRoles) ? principal.userRoles : [];
     state.authUser = principal && roles.includes('authenticated') ? principal : null;
+    state.publicAccess = normalizePublicAccess(data?.publicAccess, state.authUser);
   } catch {
     state.authUser = null;
+    state.publicAccess = normalizePublicAccess(null, null);
   } finally {
     state.authChecked = true;
     state.developerToolsEnabled = isDeveloperAccount(state.authUser);
@@ -281,22 +294,69 @@ async function loadAuthState() {
 
 function renderAuthState() {
   const details = state.authUser?.userDetails || '';
+  const interactiveAllowed = canUseInteractiveFeatures();
+  const publicClosed = state.authUser && !interactiveAllowed;
   if (els.accountStatus) {
     els.accountStatus.textContent = details ? `account: ${details}` : 'account: local/anonymous';
     els.accountStatus.title = details || 'local/anonymous';
+  }
+  if (els.publicClosedNotice) {
+    els.publicClosedNotice.hidden = !publicClosed;
+    els.publicClosedNotice.textContent = state.publicAccess.message || PUBLIC_PERIOD_ENDED_MESSAGE;
   }
   if (els.btnLogin) els.btnLogin.style.display = state.authUser ? 'none' : '';
   if (els.btnLogout) els.btnLogout.style.display = state.authUser ? '' : 'none';
   if (els.loginView) els.loginView.hidden = Boolean(state.authUser);
   const main = document.querySelector('main.layout');
-  if (main) main.hidden = !state.authUser;
+  if (main) {
+    main.hidden = !state.authUser;
+    main.classList.toggle('logsOnly', Boolean(publicClosed));
+  }
+  setHidden(document.querySelector('.stagePanel'), publicClosed);
+  for (const name of ['advice', 'transcript']) {
+    setHidden(document.querySelector(`.tab[data-tab="${name}"]`), publicClosed);
+    setHidden(document.getElementById(`${name}Tab`), publicClosed);
+  }
+  if (publicClosed) activateTab('logs');
   if (state.authUser) scheduleStageResize();
-  if (els.btnConnect) els.btnConnect.disabled = !state.authUser || state.realtimeStarting || state.connectionLoading || Boolean(state.pc || state.dataChannel);
+  if (els.btnConnect) els.btnConnect.disabled = !state.authUser || !interactiveAllowed || state.realtimeStarting || state.connectionLoading || Boolean(state.pc || state.dataChannel);
+  if (els.btnSendText) els.btnSendText.disabled = !state.authUser || !interactiveAllowed;
+  if (els.textInput) {
+    els.textInput.disabled = !state.authUser || !interactiveAllowed;
+    els.textInput.placeholder = publicClosed
+      ? PUBLIC_PERIOD_ENDED_MESSAGE
+      : 'テキストでも試せます。例: 最近オフィスに戻って疲れますね。';
+  }
   if (!state.authUser && location.pathname !== '/login') {
     history.replaceState(null, '', '/login');
   } else if (state.authUser && location.pathname === '/login') {
     history.replaceState(null, '', '/');
   }
+}
+
+function normalizePublicAccess(value, principal) {
+  const access = value && typeof value === 'object' ? value : {};
+  const ended = Boolean(access.ended);
+  const exempt = Boolean(access.exempt);
+  const authenticated = Boolean(principal);
+  const canUse = access.canUseInteractiveFeatures !== undefined
+    ? Boolean(access.canUseInteractiveFeatures)
+    : authenticated && (!ended || exempt);
+  return {
+    ended,
+    exempt,
+    canUseInteractiveFeatures: canUse,
+    logAccess: String(access.logAccess || (authenticated ? (ended && !exempt ? 'read-only' : 'read-write') : 'none')),
+    message: String(access.message || (ended && !exempt ? PUBLIC_PERIOD_ENDED_MESSAGE : ''))
+  };
+}
+
+function canUseInteractiveFeatures() {
+  return Boolean(state.authUser && state.publicAccess.canUseInteractiveFeatures);
+}
+
+function canWriteLogs() {
+  return Boolean(state.authUser && state.publicAccess.logAccess === 'read-write');
 }
 
 async function loginWithEmail(event) {
@@ -381,7 +441,7 @@ function setConnectionLoading(loading, text = '') {
   if (els.btnConnect) {
     els.btnConnect.classList.toggle('busy', state.connectionLoading);
     els.btnConnect.textContent = state.connectionLoading ? '接続中' : '接続開始';
-    els.btnConnect.disabled = !state.authUser || state.realtimeStarting || state.connectionLoading || Boolean(state.pc || state.dataChannel);
+    els.btnConnect.disabled = !state.authUser || !canUseInteractiveFeatures() || state.realtimeStarting || state.connectionLoading || Boolean(state.pc || state.dataChannel);
   }
   if (els.connectionStatus) {
     els.connectionStatus.classList.toggle('busy', state.connectionLoading);
@@ -542,10 +602,22 @@ function resetLipSyncAudio() {
   avatarStage.resetAudio();
 }
 
+function ensureRealtimeForVR() {
+  if (!canUseInteractiveFeatures()) return;
+  if (state.realtimeStarting || state.pc || state.dataChannel) return;
+  logEvent({ type: 'client.vr_realtime_autostart', sessionId: state.activeRealtimeSessionId });
+  void startRealtime();
+}
+
 async function startRealtime() {
   if (!state.authUser) {
     renderAuthState();
     if (els.loginError) els.loginError.textContent = 'ログインしてから接続してください。';
+    return;
+  }
+  if (!canUseInteractiveFeatures()) {
+    addAdvice('app', PUBLIC_PERIOD_ENDED_MESSAGE, 'warn');
+    renderAuthState();
     return;
   }
   if (state.realtimeStarting || state.pc || state.dataChannel) {
@@ -597,9 +669,7 @@ async function startRealtime() {
 
     setConnectionLoading(true, 'マイクの許可を待っています');
     setConnectionStatus('microphone');
-    const mediaStream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
-    });
+    const mediaStream = await getMicrophoneMediaStream(sessionId);
     if (!isActiveRealtimeSession(sessionId)) {
       mediaStream.getTracks().forEach((track) => track.stop());
       return;
@@ -708,6 +778,58 @@ function wireDataChannel(dc, sessionId) {
   });
 }
 
+async function getMicrophoneMediaStream(sessionId) {
+  const preferred = microphoneAudioConstraints('remote-only');
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: preferred });
+    logMicrophoneCaptureSettings(sessionId, 'preferred', preferred, stream);
+    return stream;
+  } catch (error) {
+    const fallback = microphoneAudioConstraints(true);
+    logEvent({
+      type: 'client.microphone_preferred_constraints_failed',
+      sessionId,
+      error: error.message || String(error),
+      preferred
+    });
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: fallback });
+    logMicrophoneCaptureSettings(sessionId, 'fallback', fallback, stream);
+    return stream;
+  }
+}
+
+function microphoneAudioConstraints(echoCancellation) {
+  return {
+    echoCancellation,
+    noiseSuppression: true,
+    autoGainControl: true
+  };
+}
+
+function logMicrophoneCaptureSettings(sessionId, mode, constraints, stream) {
+  const tracks = stream.getAudioTracks().map((track) => ({
+    label: track.label || '',
+    enabled: track.enabled,
+    muted: track.muted,
+    settings: safeTrackSettings(track)
+  }));
+  logEvent({
+    type: 'client.microphone_capture_settings',
+    sessionId,
+    mode,
+    constraints,
+    tracks
+  });
+}
+
+function safeTrackSettings(track) {
+  try {
+    return track.getSettings?.() || {};
+  } catch {
+    return {};
+  }
+}
+
 function handleRealtimeEffect(effect) {
   switch (effect.type) {
     case 'sendClientEvent':
@@ -793,7 +915,7 @@ function scheduleAdvisorFromRealtimeResponse(sessionId, responseId, assistantTex
         responseId,
         diagnostics: {
           ...diagnostics,
-          latestUserItemId: latestUser.sourceId || ''
+          ...transcriptTimingMeta(latestUser)
         }
       });
     } else if (diagnostics.incompleteReason) {
@@ -828,6 +950,18 @@ function latestTranscriptByRole(role, minPerfAt = 0) {
     }
   }
   return null;
+}
+
+function transcriptTimingMeta(item) {
+  if (!item) return {};
+  return {
+    latestUserItemId: item.sourceId || '',
+    latestUserStartPerfAt: finiteNumber(item.startPerfAt),
+    latestUserEndPerfAt: finiteNumber(item.endPerfAt || item.perfAt),
+    latestUserDurationMs: finiteNumber(item.durationMs),
+    latestUserAvatarOverlapMs: finiteNumber(item.avatarOverlapMs),
+    latestUserOverlappedAvatar: Boolean(item.overlappedAvatar)
+  };
 }
 
 function formatApiError(data, fallback) {
@@ -879,7 +1013,7 @@ async function stopRealtime(showMessage = true, sessionId = state.activeRealtime
   avatarStage.setAvatarSpeaking(false);
   coachAdvice.resetQueue();
   setConnectionLoading(false);
-  els.btnConnect.disabled = false;
+  els.btnConnect.disabled = !canUseInteractiveFeatures();
   els.btnDisconnect.disabled = true;
   setConnectionStatus('idle');
   setAvatarMood('neutral');
@@ -891,6 +1025,11 @@ async function sendText() {
   if (!state.authUser) {
     renderAuthState();
     if (els.loginError) els.loginError.textContent = 'ログインしてから送信してください。';
+    return;
+  }
+  if (!canUseInteractiveFeatures()) {
+    addAdvice('app', PUBLIC_PERIOD_ENDED_MESSAGE, 'warn');
+    renderAuthState();
     return;
   }
   const text = els.textInput.value.trim();
@@ -938,7 +1077,15 @@ function addTranscript(role, text, options = {}) {
     text,
     at: new Date().toISOString(),
     perfAt: Number(options.perfAt) || performance.now(),
-    sourceId: options.sourceId || ''
+    sourceId: options.sourceId || '',
+    startPerfAt: finiteNumber(options.startPerfAt),
+    endPerfAt: finiteNumber(options.endPerfAt),
+    durationMs: finiteNumber(options.durationMs),
+    approxSpeechMs: finiteNumber(options.approxSpeechMs),
+    avatarOverlapMs: finiteNumber(options.avatarOverlapMs),
+    overlappedAvatar: Boolean(options.overlappedAvatar),
+    audioStartMs: finiteNumber(options.audioStartMs),
+    audioEndMs: finiteNumber(options.audioEndMs)
   };
   state.transcript.push(item);
   state.transcript.sort((a, b) => Number(a.perfAt || 0) - Number(b.perfAt || 0));
@@ -1049,12 +1196,13 @@ function renderSavedSessions(sessions) {
     card.addEventListener('click', () => loadSavedLogItems(session.sessionId));
     els.savedSessionsFeed.appendChild(card);
   }
+  if (els.btnDeleteLog) els.btnDeleteLog.disabled = !state.selectedSavedSessionId || !canWriteLogs();
 }
 
 async function loadSavedLogItems(sessionId) {
   if (!sessionId) return;
   state.selectedSavedSessionId = sessionId;
-  if (els.btnDeleteLog) els.btnDeleteLog.disabled = false;
+  if (els.btnDeleteLog) els.btnDeleteLog.disabled = !canWriteLogs();
   try {
     const items = await conversationLog.loadItems(sessionId);
     renderSavedLogItems(items);
@@ -1088,6 +1236,10 @@ function renderSavedLogItems(items) {
 
 async function deleteSelectedSavedSession() {
   const sessionId = state.selectedSavedSessionId;
+  if (!canWriteLogs()) {
+    addAdvice('app', PUBLIC_PERIOD_ENDED_MESSAGE, 'warn');
+    return;
+  }
   if (!sessionId || !window.confirm('選択中の保存ログを削除します。')) return;
   try {
     await conversationLog.deleteSession(sessionId);
@@ -1106,11 +1258,20 @@ function formatLogDate(value) {
   return date.toLocaleString('ja-JP', { hour12: false });
 }
 
+function finiteNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : 0;
+}
+
 function immediateAdvice(text) {
   coachAdvice.immediateAdvice(text);
 }
 
 async function requestAdvisor(role, latestText, meta = {}) {
+  if (!canUseInteractiveFeatures()) {
+    logEvent({ type: 'client.advisor_skipped', reason: 'public_period_ended', sessionId: meta.sessionId ?? null });
+    return;
+  }
   return coachAdvice.request({ role, latestText, meta });
 }
 

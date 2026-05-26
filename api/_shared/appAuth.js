@@ -8,12 +8,15 @@ const DEFAULT_DEMO_EMAIL = 'demo2026@catkawaii.com';
 const DEFAULT_DEVELOPER_EMAILS = [
   'developer@example.com'
 ];
+const DEFAULT_PUBLIC_ACCESS_ENDS_AT = '2026-06-10T00:00:00+09:00';
+const PUBLIC_PERIOD_ENDED_MESSAGE = '公開期間を終了しました';
 
 class HttpError extends Error {
-  constructor(status, message) {
+  constructor(status, message, extra = {}) {
     super(message);
     this.name = 'HttpError';
     this.status = status;
+    Object.assign(this, extra);
   }
 }
 
@@ -59,6 +62,22 @@ function optionalAuthenticatedPrincipal(req) {
 function requireDeveloperUser(req) {
   const user = authenticatedUser(req);
   if (!user.isDeveloper) throw new HttpError(403, 'developer account required');
+  return user;
+}
+
+function requireInteractiveAccess(req) {
+  const user = authenticatedUser(req);
+  if (!canUseInteractiveFeatures(user.principal)) {
+    throw new HttpError(403, PUBLIC_PERIOD_ENDED_MESSAGE, { code: 'public_period_ended' });
+  }
+  return user;
+}
+
+function requireLogWriteAccess(req) {
+  const user = authenticatedUser(req);
+  if (!canUseInteractiveFeatures(user.principal)) {
+    throw new HttpError(403, PUBLIC_PERIOD_ENDED_MESSAGE, { code: 'public_period_ended' });
+  }
   return user;
 }
 
@@ -193,6 +212,49 @@ function isDeveloperPrincipal(principal) {
   return principalIdentityValues(principal).some((value) => allowed.has(value));
 }
 
+function canUseInteractiveFeatures(principal, now = Date.now()) {
+  return !isPublicAccessEnded(now) || isPublicAccessExemptPrincipal(principal);
+}
+
+function publicAccessState(principal = null, now = Date.now()) {
+  const ended = isPublicAccessEnded(now);
+  const exempt = Boolean(principal && isPublicAccessExemptPrincipal(principal));
+  return {
+    ended,
+    exempt,
+    canUseInteractiveFeatures: !ended || exempt,
+    logAccess: principal ? (ended && !exempt ? 'read-only' : 'read-write') : 'none',
+    message: ended && !exempt ? PUBLIC_PERIOD_ENDED_MESSAGE : ''
+  };
+}
+
+function isPublicAccessEnded(now = Date.now()) {
+  return Number(now) >= publicAccessEndsAtMs();
+}
+
+function publicAccessEndsAtMs() {
+  const configured = String(process.env.ZATSUCOACH_PUBLIC_ACCESS_ENDS_AT || DEFAULT_PUBLIC_ACCESS_ENDS_AT).trim();
+  const parsed = Date.parse(configured);
+  if (!Number.isFinite(parsed)) throw new HttpError(500, 'ZATSUCOACH_PUBLIC_ACCESS_ENDS_AT is invalid');
+  return parsed;
+}
+
+function isPublicAccessExemptPrincipal(principal) {
+  return isDeveloperMicrosoftPrincipal(principal) || isDemoPasswordPrincipal(principal);
+}
+
+function isDeveloperMicrosoftPrincipal(principal) {
+  const provider = String(principal?.identityProvider || '').trim().toLowerCase();
+  return provider === 'aad' && isDeveloperPrincipal(principal);
+}
+
+function isDemoPasswordPrincipal(principal) {
+  const provider = String(principal?.identityProvider || '').trim().toLowerCase();
+  if (provider !== 'password') return false;
+  const allowed = demoEmail();
+  return principalIdentityValues(principal).some((value) => value === allowed);
+}
+
 function principalIdentityValues(principal) {
   const values = [
     principal?.userDetails,
@@ -306,6 +368,12 @@ module.exports = {
   authenticatedPrincipal,
   optionalAuthenticatedPrincipal,
   requireDeveloperUser,
+  requireInteractiveAccess,
+  requireLogWriteAccess,
+  publicAccessState,
+  isPublicAccessEnded,
+  canUseInteractiveFeatures,
+  PUBLIC_PERIOD_ENDED_MESSAGE,
   createSessionCookie,
   clearSessionCookie,
   demoEmail,

@@ -69,6 +69,52 @@ test('in-flight request queues the latest request', async () => {
   await first;
 });
 
+test('advisor request sends transcript timing diagnostics', async () => {
+  let body = null;
+  const client = createCoachAdviceClient({
+    getSettings: () => ({ advisorDeployment: 'd', advisorInstructions: 'i', reasoningEffort: 'none', advisorMaxTokens: 1024 }),
+    getTranscript: () => [{
+      role: 'user',
+      text: 'それ気になります',
+      sourceId: 'u1',
+      startPerfAt: 1100,
+      endPerfAt: 1400,
+      durationMs: 300,
+      avatarOverlapMs: 300,
+      overlappedAvatar: true
+    }],
+    fetchImpl: async (url, options) => {
+      body = JSON.parse(options.body);
+      return response({ label: 'good', advice: 'ok', deployment: 'd' });
+    },
+    now: () => 5000,
+    wallNow: () => 1,
+    setTimer: () => 1,
+    clearTimer: () => {}
+  });
+
+  await client.request({
+    role: 'user',
+    latestText: 'それ気になります',
+    meta: {
+      sessionId: 1,
+      diagnostics: {
+        latestUserItemId: 'u1',
+        timeline: {
+          userItemId: 'u1',
+          userAvatarOverlapMs: 300,
+          userOverlappedAvatar: true,
+          responseDeferred: true
+        }
+      }
+    }
+  });
+
+  assert.equal(body.transcript[0].avatarOverlapMs, 300);
+  assert.equal(body.latest.avatarOverlapMs, 300);
+  assert.equal(body.diagnostics.timeline.userAvatarOverlapMs, 300);
+});
+
 test('429 and unavailable model responses set mute/backoff without surfacing advice', async () => {
   let currentNow = 5000;
   const advice = [];

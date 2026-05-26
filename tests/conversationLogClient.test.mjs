@@ -24,7 +24,17 @@ test('creates a session on first flush and batches queued items', async () => {
     clearTimer: () => {}
   });
 
-  client.queueTranscript({ role: 'user', text: 'hello', at: '2026-01-01T00:00:00Z', perfAt: 12 });
+  client.queueTranscript({
+    role: 'user',
+    text: 'hello',
+    at: '2026-01-01T00:00:00Z',
+    perfAt: 12,
+    startPerfAt: 10,
+    endPerfAt: 40,
+    durationMs: 30,
+    avatarOverlapMs: 20,
+    overlappedAvatar: true
+  });
   await client.flush();
 
   assert.equal(calls[0].url, '/api/log-sessions');
@@ -32,6 +42,8 @@ test('creates a session on first flush and batches queued items', async () => {
   assert.equal(calls[1].url, '/api/log-items');
   assert.equal(calls[1].body.sessionId, 's1');
   assert.equal(calls[1].body.items.length, 1);
+  assert.equal(calls[1].body.items[0].meta.avatarOverlapMs, 20);
+  assert.equal(calls[1].body.items[0].meta.overlappedAvatar, true);
   assert.equal(calls[1].body.summary.transcriptCount, 1);
 });
 

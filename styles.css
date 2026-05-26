@@ -147,12 +147,24 @@ button.busy::before {
   color: var(--danger);
   font-size: 0.86rem;
 }
+.publicClosedNotice {
+  margin: 1rem 1rem 0;
+  border: 1px solid rgba(210, 153, 34, 0.58);
+  border-radius: 8px;
+  background: rgba(210, 153, 34, 0.12);
+  color: #f0d68a;
+  padding: 0.85rem 1rem;
+  font-weight: 700;
+}
 .layout {
   display: grid;
   grid-template-columns: minmax(420px, 1.35fr) minmax(360px, 0.9fr);
   gap: 1rem;
   padding: 1rem;
   height: calc(100vh - 74px);
+}
+.layout.logsOnly {
+  grid-template-columns: minmax(320px, 1fr);
 }
 .stagePanel, .coachPanel {
   border: 1px solid var(--border);

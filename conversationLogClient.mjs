@@ -23,7 +23,13 @@ export function createConversationLogClient({
       id: item.sourceId || `transcript-${item.at}-${state.sequence + 1}`,
       meta: {
         sourceId: item.sourceId || '',
-        perfAt: Math.round(Number(item.perfAt || 0))
+        perfAt: Math.round(Number(item.perfAt || 0)),
+        startPerfAt: Math.round(Number(item.startPerfAt || 0)),
+        endPerfAt: Math.round(Number(item.endPerfAt || 0)),
+        durationMs: Math.round(Number(item.durationMs || 0)),
+        approxSpeechMs: Math.round(Number(item.approxSpeechMs || 0)),
+        avatarOverlapMs: Math.round(Number(item.avatarOverlapMs || 0)),
+        overlappedAvatar: Boolean(item.overlappedAvatar)
       }
     });
   }

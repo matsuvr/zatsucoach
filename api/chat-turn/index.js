@@ -12,11 +12,11 @@ const {
   advisorEndpointRoute,
   advisorApiKey
 } = require('../_shared/azureOpenAI');
-const { authenticatedUser } = require('../_shared/appAuth');
+const { requireInteractiveAccess } = require('../_shared/appAuth');
 
 module.exports = async function (context, req) {
   try {
-    authenticatedUser(req);
+    requireInteractiveAccess(req);
 
     const body = parseJsonBody(req);
     const instructions = String(body.instructions || 'あなたは雑談練習用のアバターです。日本語で1文だけ返してください。').slice(0, 6000);

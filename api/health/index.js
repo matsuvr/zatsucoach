@@ -11,12 +11,12 @@ const {
   jsonResponse,
   errorResponse
 } = require('../_shared/azureOpenAI');
-const { authenticatedUser } = require('../_shared/appAuth');
+const { requireInteractiveAccess } = require('../_shared/appAuth');
 const { hasLogStorageConfig } = require('../_shared/logStore');
 
 module.exports = async function (context, req) {
   try {
-    authenticatedUser(req);
+    requireInteractiveAccess(req);
 
     const endpoint = endpointBase();
     const advisorEndpoint = advisorEndpointBase();

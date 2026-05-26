@@ -6,13 +6,13 @@ const DEFAULTS = Object.freeze({
 const VAD_PREFIX_PADDING_MS = 300;
 const USER_TURN_TRANSCRIPT_WAIT_MS = 800;
 const ASSISTANT_RESPONSE_FALLBACK_FLUSH_MS = 2500;
-const AVATAR_AUDIO_RELEASE_DELAY_MS = 800;
 const REALTIME_CONTEXT_PRUNE_AFTER_ITEMS = 34;
 const REALTIME_CONTEXT_KEEP_ITEMS = 28;
 const REALTIME_CONTEXT_MAX_DELETES_PER_TURN = 8;
 const REALTIME_RESPONSE_CREATE_TIMEOUT_MS = 8000;
 const REALTIME_RESPONSE_TIMEOUT_MS = 45000;
 const OUTPUT_AUDIO_STOP_TIMEOUT_MS = 20000;
+const TIMELINE_INTERVAL_KEEP_ITEMS = 60;
 
 export function createRealtimeConversationEngine({
   getSettings = () => ({}),
@@ -316,13 +316,8 @@ export function createRealtimeConversationEngine({
   function markOutputAudioStarted(event) {
     markAssistantAudioExpected(event);
     state.avatarSpeaking = true;
+    if (!state.activeAvatarAudioStartedAt) state.activeAvatarAudioStartedAt = now();
     effect('setAvatarSpeaking', { speaking: true });
-    clearStoredTimer('microphoneRestoreTimer');
-    effect('setMicrophoneEnabled', {
-      enabled: false,
-      reason: 'avatar_speaking',
-      sessionId: state.sessionId
-    });
     effect('setAvatarMood', { mood: 'speaking' });
     effect('setConnectionStatus', { text: 'avatar speaking' });
     updateAssistantResponseMeta(event.response_id, { outputAudioStartedAt: now() });
@@ -466,6 +461,8 @@ export function createRealtimeConversationEngine({
       accepted: false,
       ignored: false,
       responseSent: false,
+      avatarSpeakingAtStart: Boolean(state.avatarSpeaking),
+      avatarOverlapMs: Number(previous.avatarOverlapMs) || 0,
       decisionTimer: null
     });
   }
@@ -480,6 +477,8 @@ export function createRealtimeConversationEngine({
     turn.audioEndMs = Number(event.audio_end_ms);
     turn.perfStoppedAt = now();
     turn.approxSpeechMs = estimateSpeechDurationMs(turn, getSettings());
+    turn.avatarSpeakingAtStop = Boolean(state.avatarSpeaking);
+    turn.avatarOverlapMs = overlapMs(turn.perfStartedAt, turn.perfStoppedAt, currentAvatarAudioIntervals());
     state.userTurnByItem.set(itemId, turn);
     scheduleUserTurnDecision(itemId, USER_TURN_TRANSCRIPT_WAIT_MS, 'speech_stopped');
   }
@@ -509,6 +508,9 @@ export function createRealtimeConversationEngine({
       accepted: false,
       ignored: false,
       responseSent: false,
+      avatarSpeakingAtStart: false,
+      avatarSpeakingAtStop: false,
+      avatarOverlapMs: 0,
       decisionTimer: null
     };
   }
@@ -552,7 +554,9 @@ export function createRealtimeConversationEngine({
         approxSpeechMs: Number(turn.approxSpeechMs) || 0,
         transcriptChars: String(turn.transcriptText || '').trim().length,
         finalTranscriptChars: String(turn.finalTranscriptText || '').trim().length,
-        transcriptFinal: Boolean(turn.transcriptFinal)
+        transcriptFinal: Boolean(turn.transcriptFinal),
+        avatarOverlapMs: Number(turn.avatarOverlapMs) || 0,
+        overlappedAvatar: Number(turn.avatarOverlapMs) > 0
       }
     });
     publishFinalUserTranscriptForTurn(turn, 'accepted_with_final_transcript');
@@ -592,7 +596,8 @@ export function createRealtimeConversationEngine({
           reason,
           pendingCreate: Boolean(state.pendingRealtimeResponseCreate),
           activeResponses: state.activeRealtimeResponseIds.size,
-          avatarSpeaking: Boolean(state.avatarSpeaking)
+          avatarSpeaking: Boolean(state.avatarSpeaking),
+          avatarOverlapMs: Number(turn.avatarOverlapMs) || 0
         }
       });
       return;
@@ -603,7 +608,14 @@ export function createRealtimeConversationEngine({
     state.lastResponseStartedAt = now();
     state.pendingAssistantResponseUserItems.push({
       itemId: turn.itemId,
-      perfAt: state.userItemSpeechStoppedAt.get(turn.itemId) || turn.perfStoppedAt || now()
+      perfAt: state.userItemSpeechStoppedAt.get(turn.itemId) || turn.perfStoppedAt || now(),
+      speechStartedAt: Number(turn.perfStartedAt) || 0,
+      speechStoppedAt: Number(turn.perfStoppedAt) || 0,
+      speechDurationMs: Math.max(0, Math.round((Number(turn.perfStoppedAt) || 0) - (Number(turn.perfStartedAt) || 0))),
+      approxSpeechMs: Number(turn.approxSpeechMs) || 0,
+      avatarOverlapMs: Number(turn.avatarOverlapMs) || 0,
+      overlappedAvatar: Number(turn.avatarOverlapMs) > 0,
+      responseDeferred: Boolean(turn.responseDeferred)
     });
     if (state.pendingAssistantResponseUserItems.length > 20) state.pendingAssistantResponseUserItems.shift();
     pruneRealtimeConversationBeforeResponse(turn.itemId);
@@ -628,11 +640,6 @@ export function createRealtimeConversationEngine({
       });
       finishAvatarAudioOutput('response_create_timeout');
     }, REALTIME_RESPONSE_CREATE_TIMEOUT_MS);
-    effect('setMicrophoneEnabled', {
-      enabled: false,
-      reason: 'response_pending',
-      sessionId: state.sessionId
-    });
     effect('sendClientEvent', { event: { type: 'response.create' } });
     effect('logEvent', {
       event: {
@@ -839,7 +846,14 @@ export function createRealtimeConversationEngine({
     ].join(':');
     return publishUserTranscript(key, turn.itemId, text, reason, {
       provisionalChars: String(turn.provisionalTranscriptText || '').trim().length,
-      approxSpeechMs: Number(turn.approxSpeechMs) || 0
+      approxSpeechMs: Number(turn.approxSpeechMs) || 0,
+      startPerfAt: Number(turn.perfStartedAt) || 0,
+      endPerfAt: Number(turn.perfStoppedAt) || 0,
+      durationMs: Math.max(0, Math.round((Number(turn.perfStoppedAt) || 0) - (Number(turn.perfStartedAt) || 0))),
+      avatarOverlapMs: Number(turn.avatarOverlapMs) || 0,
+      overlappedAvatar: Number(turn.avatarOverlapMs) > 0,
+      audioStartMs: Number(turn.audioStartMs),
+      audioEndMs: Number(turn.audioEndMs)
     });
   }
 
@@ -852,7 +866,15 @@ export function createRealtimeConversationEngine({
       text,
       options: {
         perfAt: state.userItemSpeechStoppedAt.get(itemId) || now(),
-        sourceId: itemId || ''
+        sourceId: itemId || '',
+        startPerfAt: Number(diagnostics.startPerfAt) || 0,
+        endPerfAt: Number(diagnostics.endPerfAt) || 0,
+        durationMs: Number(diagnostics.durationMs) || 0,
+        approxSpeechMs: Number(diagnostics.approxSpeechMs) || 0,
+        avatarOverlapMs: Number(diagnostics.avatarOverlapMs) || 0,
+        overlappedAvatar: Boolean(diagnostics.overlappedAvatar),
+        audioStartMs: Number(diagnostics.audioStartMs),
+        audioEndMs: Number(diagnostics.audioEndMs)
       }
     });
     effect('logEvent', {
@@ -864,7 +886,9 @@ export function createRealtimeConversationEngine({
         textChars: text.length,
         finalChars: text.length,
         provisionalChars: Number(diagnostics.provisionalChars) || 0,
-        approxSpeechMs: Number(diagnostics.approxSpeechMs) || 0
+        approxSpeechMs: Number(diagnostics.approxSpeechMs) || 0,
+        avatarOverlapMs: Number(diagnostics.avatarOverlapMs) || 0,
+        overlappedAvatar: Boolean(diagnostics.overlappedAvatar)
       }
     });
     return true;
@@ -880,6 +904,13 @@ export function createRealtimeConversationEngine({
     updateAssistantResponseMeta(responseId, {
       userItemId: pending.itemId || '',
       userPerfAt: Number(pending.perfAt) || state.lastSpeechStoppedAt || 0,
+      userSpeechStartedAt: Number(pending.speechStartedAt) || 0,
+      userSpeechStoppedAt: Number(pending.speechStoppedAt) || 0,
+      userSpeechDurationMs: Number(pending.speechDurationMs) || 0,
+      userApproxSpeechMs: Number(pending.approxSpeechMs) || 0,
+      userAvatarOverlapMs: Number(pending.avatarOverlapMs) || 0,
+      userOverlappedAvatar: Boolean(pending.overlappedAvatar),
+      responseDeferred: Boolean(pending.responseDeferred),
       responseCreatedAt: now()
     });
   }
@@ -1010,7 +1041,16 @@ export function createRealtimeConversationEngine({
     if (!text) return;
     const incompleteReason = assistantIncompleteReason(meta);
     if (!incompleteReason) {
-      effect('addTranscript', { role: 'assistant', text, options: { sourceId: responseId } });
+      effect('addTranscript', {
+        role: 'assistant',
+        text,
+        options: {
+          sourceId: responseId,
+          startPerfAt: Number(meta.outputAudioStartedAt) || Number(meta.responseCreatedAt) || 0,
+          endPerfAt: Number(meta.outputAudioStoppedAt) || Number(meta.responseDoneAt) || 0,
+          durationMs: durationBetween(meta.outputAudioStartedAt || meta.responseCreatedAt, meta.outputAudioStoppedAt || meta.responseDoneAt)
+        }
+      });
     }
     effect('logEvent', {
       event: {
@@ -1044,7 +1084,8 @@ export function createRealtimeConversationEngine({
       diagnostics: {
         incompleteReason,
         userItemId: meta.userItemId || '',
-        userPerfAt: Number(meta.userPerfAt) || 0
+        userPerfAt: Number(meta.userPerfAt) || 0,
+        timeline: assistantResponseTimeline(responseId, meta)
       }
     });
   }
@@ -1059,20 +1100,52 @@ export function createRealtimeConversationEngine({
       return;
     }
 
+    closeActiveAvatarAudioInterval(now());
     state.avatarSpeaking = false;
     effect('setAvatarSpeaking', { speaking: false });
     effect('setAvatarMood', { mood: 'neutral' });
     effect('setConnectionStatus', { text: 'connected' });
-    clearStoredTimer('microphoneRestoreTimer');
     if (sendDeferredManualResponseCreate(reason)) return;
-    state.microphoneRestoreTimer = setTimer(() => {
-      if (!isActive() || state.activeAssistantAudioResponseIds.size || hasActiveResponse()) return;
-      effect('setMicrophoneEnabled', {
-        enabled: true,
-        reason,
-        sessionId: state.sessionId
-      });
-    }, AVATAR_AUDIO_RELEASE_DELAY_MS);
+  }
+
+  function currentAvatarAudioIntervals() {
+    const intervals = state.avatarAudioIntervals.slice();
+    if (state.activeAvatarAudioStartedAt) {
+      intervals.push({ start: state.activeAvatarAudioStartedAt, end: now() });
+    }
+    return intervals;
+  }
+
+  function closeActiveAvatarAudioInterval(endAt) {
+    const start = Number(state.activeAvatarAudioStartedAt) || 0;
+    if (!start) return;
+    const end = Math.max(start, Number(endAt) || start);
+    state.avatarAudioIntervals.push({ start, end });
+    if (state.avatarAudioIntervals.length > TIMELINE_INTERVAL_KEEP_ITEMS) {
+      state.avatarAudioIntervals = state.avatarAudioIntervals.slice(-TIMELINE_INTERVAL_KEEP_ITEMS);
+    }
+    state.activeAvatarAudioStartedAt = 0;
+  }
+
+  function assistantResponseTimeline(responseId, meta) {
+    return {
+      responseId,
+      userItemId: meta.userItemId || '',
+      userSpeechStartedAt: Number(meta.userSpeechStartedAt) || 0,
+      userSpeechStoppedAt: Number(meta.userSpeechStoppedAt) || Number(meta.userPerfAt) || 0,
+      userSpeechDurationMs: Number(meta.userSpeechDurationMs) || 0,
+      userApproxSpeechMs: Number(meta.userApproxSpeechMs) || 0,
+      userAvatarOverlapMs: Number(meta.userAvatarOverlapMs) || 0,
+      userOverlappedAvatar: Boolean(meta.userOverlappedAvatar),
+      responseDeferred: Boolean(meta.responseDeferred),
+      responseCreatedAt: Number(meta.responseCreatedAt) || 0,
+      outputAudioStartedAt: Number(meta.outputAudioStartedAt) || 0,
+      outputAudioStoppedAt: Number(meta.outputAudioStoppedAt) || 0,
+      responseDoneAt: Number(meta.responseDoneAt) || 0,
+      userToResponseCreateMs: durationBetween(meta.userSpeechStoppedAt || meta.userPerfAt, meta.responseCreatedAt),
+      userToOutputAudioStartMs: durationBetween(meta.userSpeechStoppedAt || meta.userPerfAt, meta.outputAudioStartedAt),
+      outputAudioDurationMs: durationBetween(meta.outputAudioStartedAt, meta.outputAudioStoppedAt || meta.responseDoneAt)
+    };
   }
 
   function clearPendingResponseCreate() {
@@ -1108,6 +1181,8 @@ export function createRealtimeConversationEngine({
     state.deferredUserResponseTurnId = '';
     state.activeAssistantAudioResponseIds.clear();
     clearAllOutputAudioStopWatchdogs();
+    state.activeAvatarAudioStartedAt = 0;
+    state.avatarAudioIntervals = [];
     state.realtimeConversationItems.clear();
     state.realtimeConversationSeq = 0;
     state.processedAssistantResponseKeys.clear();
@@ -1115,7 +1190,6 @@ export function createRealtimeConversationEngine({
     clearUserTranscriptState();
     state.lastSpeechStoppedAt = 0;
     state.lastResponseStartedAt = 0;
-    clearStoredTimer('microphoneRestoreTimer');
     clearStoredTimer('sessionUpdateWatchdogTimer');
   }
 
@@ -1162,9 +1236,10 @@ function createInitialState() {
     deferredUserResponseTurnId: '',
     activeAssistantAudioResponseIds: new Set(),
     outputAudioStopWatchdogTimers: new Map(),
+    activeAvatarAudioStartedAt: 0,
+    avatarAudioIntervals: [],
     realtimeConversationItems: new Map(),
     realtimeConversationSeq: 0,
-    microphoneRestoreTimer: null,
     processedAssistantResponseKeys: new Set(),
     processedAssistantResponses: new Set(),
     userTextByItem: new Map(),
@@ -1236,6 +1311,25 @@ function summarizeUsage(usage) {
     input_tokens: usage.input_tokens ?? null,
     output_tokens: usage.output_tokens ?? null
   };
+}
+
+function durationBetween(start, end) {
+  const startMs = Number(start);
+  const endMs = Number(end);
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) return 0;
+  return Math.round(endMs - startMs);
+}
+
+function overlapMs(start, end, intervals) {
+  const startMs = Number(start);
+  const endMs = Number(end);
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs || !Array.isArray(intervals)) return 0;
+  return intervals.reduce((sum, interval) => {
+    const intervalStart = Number(interval?.start);
+    const intervalEnd = Number(interval?.end);
+    if (!Number.isFinite(intervalStart) || !Number.isFinite(intervalEnd) || intervalEnd <= intervalStart) return sum;
+    return sum + Math.max(0, Math.min(endMs, intervalEnd) - Math.max(startMs, intervalStart));
+  }, 0);
 }
 
 function trimSet(set, maxSize, keepSize) {

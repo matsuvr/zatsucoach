@@ -85,7 +85,16 @@ export function createCoachAdviceClient({
           instructions: settings.advisorInstructions,
           reasoningEffort: settings.reasoningEffort,
           maxTokens: settings.advisorMaxTokens,
-          latest: { role, text: latestText },
+          latest: {
+            role,
+            text: latestText,
+            sourceId: meta.diagnostics?.latestUserItemId || '',
+            startPerfAt: meta.diagnostics?.latestUserStartPerfAt || 0,
+            endPerfAt: meta.diagnostics?.latestUserEndPerfAt || 0,
+            durationMs: meta.diagnostics?.latestUserDurationMs || 0,
+            avatarOverlapMs: meta.diagnostics?.latestUserAvatarOverlapMs || meta.diagnostics?.timeline?.userAvatarOverlapMs || 0,
+            overlappedAvatar: Boolean(meta.diagnostics?.latestUserOverlappedAvatar || meta.diagnostics?.timeline?.userOverlappedAvatar)
+          },
           transcript,
           clientRequestId,
           sessionId: meta.sessionId || null,

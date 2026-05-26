@@ -17,11 +17,12 @@ const {
   patchSessionEntity,
   sessionDto
 } = require('../_shared/logStore');
+const { requireLogWriteAccess } = require('../_shared/appAuth');
 
 module.exports = async function (context, req) {
   try {
-    const user = authenticatedUser(req);
     const method = String(req.method || 'GET').toUpperCase();
+    const user = method === 'GET' ? authenticatedUser(req) : requireLogWriteAccess(req);
 
     if (method === 'GET') {
       return await listSessions(context, req, user);

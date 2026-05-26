@@ -230,7 +230,15 @@ function trimTranscriptByBudget(transcript, { maxItems = 60, maxChars = 12000, m
     .map((item) => ({
       role: item?.role === 'assistant' ? 'assistant' : 'user',
       text: String(item?.text || '').trim().slice(0, maxTextChars),
-      at: item?.at ? String(item.at).slice(0, 40) : undefined
+      at: item?.at ? String(item.at).slice(0, 40) : undefined,
+      sourceId: item?.sourceId ? String(item.sourceId).slice(0, 160) : undefined,
+      startPerfAt: safeFiniteNumber(item?.startPerfAt),
+      endPerfAt: safeFiniteNumber(item?.endPerfAt),
+      perfAt: safeFiniteNumber(item?.perfAt),
+      durationMs: safeFiniteNumber(item?.durationMs),
+      approxSpeechMs: safeFiniteNumber(item?.approxSpeechMs),
+      avatarOverlapMs: safeFiniteNumber(item?.avatarOverlapMs),
+      overlappedAvatar: Boolean(item?.overlappedAvatar)
     }))
     .filter((item) => item.text)
     .map((item) => ({
@@ -250,6 +258,11 @@ function trimTranscriptByBudget(transcript, { maxItems = 60, maxChars = 12000, m
     usedTokens += item.estimatedTokens;
   }
   return selected.reverse().map(({ estimatedTokens, ...item }) => item);
+}
+
+function safeFiniteNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : 0;
 }
 
 function buildChatMessages({ instructions, transcript, maxItems = 60, maxChars = 12000, maxTextChars = 1200, maxTokens = 6000 }) {

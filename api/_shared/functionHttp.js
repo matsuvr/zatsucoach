@@ -21,6 +21,7 @@ function errorResponse(context, error, status = 500, extra = {}) {
     headers: { 'Content-Type': 'application/json' },
     body: {
       error: error && error.message ? error.message : String(error),
+      code: error?.code,
       attempts: Array.isArray(error?.attempts) ? error.attempts : undefined,
       retryAfterMs: Number.isFinite(error?.retryAfterMs) ? error.retryAfterMs : undefined,
       rateLimits: error?.rateLimits,

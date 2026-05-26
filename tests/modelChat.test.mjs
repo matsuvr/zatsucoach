@@ -84,6 +84,25 @@ test('token budget trimming keeps newest usable transcript items', () => {
   assert.deepEqual(trimmed.map((item) => item.text.slice(0, 9)), ['message 6', 'message 7', 'message 8', 'message 9']);
 });
 
+test('token budget trimming preserves compact transcript timing metadata', () => {
+  const trimmed = trimTranscriptByBudget([{
+    role: 'user',
+    text: 'それ気になります',
+    sourceId: 'u1',
+    perfAt: 1400,
+    startPerfAt: 1100,
+    endPerfAt: 1400,
+    durationMs: 300,
+    approxSpeechMs: 250,
+    avatarOverlapMs: 300,
+    overlappedAvatar: true
+  }]);
+
+  assert.equal(trimmed[0].sourceId, 'u1');
+  assert.equal(trimmed[0].avatarOverlapMs, 300);
+  assert.equal(trimmed[0].overlappedAvatar, true);
+});
+
 test('chat messages prepend instructions and normalize transcript roles', () => {
   assert.deepEqual(buildChatMessages({
     instructions: 'system',

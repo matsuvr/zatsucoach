@@ -1,10 +1,12 @@
 'use strict';
 
 const { jsonResponse } = require('../_shared/azureOpenAI');
-const { optionalAuthenticatedPrincipal } = require('../_shared/appAuth');
+const { optionalAuthenticatedPrincipal, publicAccessState } = require('../_shared/appAuth');
 
 module.exports = async function (context, req) {
+  const clientPrincipal = optionalAuthenticatedPrincipal(req);
   jsonResponse(context, {
-    clientPrincipal: optionalAuthenticatedPrincipal(req)
+    clientPrincipal,
+    publicAccess: publicAccessState(clientPrincipal)
   });
 };

@@ -13,7 +13,7 @@ const {
   advisorEndpointRoute,
   advisorApiKey
 } = require('../_shared/azureOpenAI');
-const { authenticatedUser } = require('../_shared/appAuth');
+const { requireInteractiveAccess } = require('../_shared/appAuth');
 
 const DEFAULT_INSTRUCTIONS = `You are a real-time Japanese conversation coach. Return only JSON: {"label":"good|warn|risk","advice":"1-3 concise Japanese sentences","reason":"short Japanese reason"}. Prioritize speed and practical next steps.`;
 
@@ -22,13 +22,14 @@ const ROLE_GUARD_INSTRUCTIONS = `Critical role mapping:
 - The conversation partner avatar is speaker="avatar" and is shown in the UI as "アバター".
 - Do not treat avatar lines as your own assistant messages.
 - Evaluate only latest_user_utterance when it is present. Use conversation_log only as context.
-- If latest_user_utterance is null, infer cautiously from the avatar response and explicitly avoid blaming the trainee for unknown text.`;
+- If latest_user_utterance is null, infer cautiously from the avatar response and explicitly avoid blaming the trainee for unknown text.
+- Use conversation_timeline and timing fields as coaching signals. Brief overlap with the avatar can be natural interest; do not penalize it by default. Long pauses, repeated deferred responses, or interrupting before the other speaker's point is clear may be worth mentioning.`;
 
 module.exports = async function (context, req) {
   const startedAt = Date.now();
   let requestMeta = {};
   try {
-    authenticatedUser(req);
+    requireInteractiveAccess(req);
 
     const body = parseJsonBody(req);
     requestMeta = {
@@ -49,6 +50,8 @@ module.exports = async function (context, req) {
     const maxTokens = clampNumber(body.maxTokens, 2048, 512, 4096);
 
     const latestItem = normalizeAdvisorItem(latest);
+    const conversationLog = transcript.map(normalizeAdvisorItem).filter(Boolean);
+    const diagnostics = normalizeDiagnostics(body.diagnostics);
     const userPayload = {
       task: 'Evaluate the trainee user utterance for low-friction office small talk. Use the avatar turns only as context. Keep it brief.',
       role_mapping: {
@@ -57,7 +60,17 @@ module.exports = async function (context, req) {
       },
       latest_user_utterance: latestItem?.speaker === 'user' ? latestItem : null,
       latest_observed_item: latestItem,
-      conversation_log: transcript.map(normalizeAdvisorItem).filter(Boolean)
+      conversation_log: conversationLog,
+      conversation_timeline: {
+        latest_response: diagnostics.timeline || null,
+        latest_user_timing: latestItem?.speaker === 'user' ? latestItem.timing || null : null,
+        recent_items: conversationLog.map((item) => ({
+          speaker: item.speaker,
+          sourceId: item.sourceId || '',
+          text: item.text,
+          timing: item.timing || null
+        })).filter((item) => item.timing)
+      }
     };
     const messages = [{ role: 'system', content: `${instructions}\n\n${ROLE_GUARD_INSTRUCTIONS}` }];
     messages.push({ role: 'user', content: JSON.stringify(userPayload) });
@@ -148,10 +161,62 @@ function normalizeAdvisorItem(item) {
   const text = String(item?.text || '').trim();
   if (!text) return null;
   const speaker = item.role === 'assistant' ? 'avatar' : 'user';
-  return {
+  const normalized = {
     speaker,
     displayName: speaker === 'user' ? 'あなた' : 'アバター',
     text,
-    at: item.at ? String(item.at).slice(0, 40) : undefined
+    at: item.at ? String(item.at).slice(0, 40) : undefined,
+    sourceId: item.sourceId ? String(item.sourceId).slice(0, 160) : undefined
   };
+  const timing = normalizeTiming(item);
+  if (timing) normalized.timing = timing;
+  return normalized;
+}
+
+function normalizeTiming(item) {
+  const timing = {
+    perfAt: safeFiniteNumber(item?.perfAt),
+    startPerfAt: safeFiniteNumber(item?.startPerfAt),
+    endPerfAt: safeFiniteNumber(item?.endPerfAt),
+    durationMs: safeFiniteNumber(item?.durationMs),
+    approxSpeechMs: safeFiniteNumber(item?.approxSpeechMs),
+    avatarOverlapMs: safeFiniteNumber(item?.avatarOverlapMs),
+    overlappedAvatar: Boolean(item?.overlappedAvatar)
+  };
+  const hasTiming = timing.perfAt || timing.startPerfAt || timing.endPerfAt || timing.durationMs || timing.approxSpeechMs || timing.avatarOverlapMs;
+  return hasTiming ? timing : null;
+}
+
+function normalizeDiagnostics(value) {
+  const diagnostics = value && typeof value === 'object' ? value : {};
+  const timeline = diagnostics.timeline && typeof diagnostics.timeline === 'object'
+    ? normalizeResponseTimeline(diagnostics.timeline)
+    : null;
+  return { timeline };
+}
+
+function normalizeResponseTimeline(timeline) {
+  return {
+    responseId: String(timeline.responseId || '').slice(0, 160),
+    userItemId: String(timeline.userItemId || '').slice(0, 160),
+    userSpeechStartedAt: safeFiniteNumber(timeline.userSpeechStartedAt),
+    userSpeechStoppedAt: safeFiniteNumber(timeline.userSpeechStoppedAt),
+    userSpeechDurationMs: safeFiniteNumber(timeline.userSpeechDurationMs),
+    userApproxSpeechMs: safeFiniteNumber(timeline.userApproxSpeechMs),
+    userAvatarOverlapMs: safeFiniteNumber(timeline.userAvatarOverlapMs),
+    userOverlappedAvatar: Boolean(timeline.userOverlappedAvatar),
+    responseDeferred: Boolean(timeline.responseDeferred),
+    responseCreatedAt: safeFiniteNumber(timeline.responseCreatedAt),
+    outputAudioStartedAt: safeFiniteNumber(timeline.outputAudioStartedAt),
+    outputAudioStoppedAt: safeFiniteNumber(timeline.outputAudioStoppedAt),
+    responseDoneAt: safeFiniteNumber(timeline.responseDoneAt),
+    userToResponseCreateMs: safeFiniteNumber(timeline.userToResponseCreateMs),
+    userToOutputAudioStartMs: safeFiniteNumber(timeline.userToOutputAudioStartMs),
+    outputAudioDurationMs: safeFiniteNumber(timeline.outputAudioDurationMs)
+  };
+}
+
+function safeFiniteNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.round(number) : 0;
 }

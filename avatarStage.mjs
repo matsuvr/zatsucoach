@@ -32,7 +32,9 @@ let VRMLookAtQuaternionProxy = null;
 export function createAvatarStage({
   elements,
   onAdvice = () => {},
-  onLoadingChange = () => {}
+  onLoadingChange = () => {},
+  onVRSessionRequested = () => {},
+  onVRSessionStart = () => {}
 } = {}) {
   const els = elements || {};
   const state = {
@@ -101,6 +103,7 @@ export function createAvatarStage({
     els.stage.appendChild(renderer.domElement);
     const vrButton = VRButton.createButton(renderer);
     vrButton.classList.add('stageVrButton');
+    vrButton.addEventListener('click', handleVRButtonClick, { capture: true });
     els.stage.appendChild(vrButton);
 
     const controls = new OrbitControls(camera, renderer.domElement);
@@ -178,12 +181,19 @@ export function createAvatarStage({
   }
 
   function handleXRSessionStart() {
+    onVRSessionStart();
     if (state.controls) state.controls.enabled = false;
     if (!state.cameraRig) return;
     state.cameraRig.position.set(STAGE_CAMERA_POSITION.x, 0, STAGE_CAMERA_POSITION.z);
     state.cameraRig.rotation.set(0, 0, 0);
     state.cameraRig.scale.set(1, 1, 1);
     state.cameraRig.updateMatrixWorld(true);
+  }
+
+  function handleVRButtonClick() {
+    if (state.renderer?.xr?.isPresenting) return;
+    if (!/ENTER\s+VR/i.test(this?.textContent || '')) return;
+    onVRSessionRequested();
   }
 
   function handleXRSessionEnd() {
@@ -622,6 +632,9 @@ export function createAvatarStage({
       width: 1.25,
       height: 0.23,
       fontSize: 50,
+      minFontSize: 32,
+      maxLines: 4,
+      fitText: true,
       tail: 'none',
       background: '#fbfbf6',
       color: '#151922'
@@ -646,11 +659,25 @@ export function createAvatarStage({
     const rectX = options.tail === 'left' ? tailSize : 0;
     const rectWidth = canvas.width - (sideTail ? tailSize : 0);
     const maxTextWidth = rectWidth - paddingX * 2;
-    const lineHeight = options.fontSize * 1.24;
-    const maxLines = options.truncate === false ? Infinity : (options.role === 'advice' ? 2 : 3);
+    const maxLines = options.truncate === false
+      ? Infinity
+      : (Number.isFinite(options.maxLines) ? options.maxLines : (options.role === 'advice' ? 2 : 3));
 
-    ctx.font = `600 ${options.fontSize}px ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif`;
-    const lines = wrapCanvasText(ctx, text, maxTextWidth, maxLines, options.truncate !== false);
+    setCanvasTextFont(ctx, options.fontSize);
+    const textLayout = options.fitText
+      ? fitCanvasText(ctx, text, {
+        maxWidth: maxTextWidth,
+        maxLines,
+        fontSize: options.fontSize,
+        minFontSize: options.minFontSize || options.fontSize,
+        truncate: options.truncate !== false
+      })
+      : {
+        fontSize: options.fontSize,
+        lines: wrapCanvasText(ctx, text, maxTextWidth, maxLines, options.truncate !== false)
+      };
+    const { fontSize, lines } = textLayout;
+    const lineHeight = fontSize * 1.24;
     const bodyCanvasHeight = Math.max(minCanvasHeight, Math.ceil(paddingY * 2 + lines.length * lineHeight + 28));
     canvas.height = bodyCanvasHeight + bottomTailSize;
     ctx = canvas.getContext('2d');
@@ -666,7 +693,7 @@ export function createAvatarStage({
     ctx.fillStyle = options.color;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.font = `600 ${options.fontSize}px ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif`;
+    setCanvasTextFont(ctx, fontSize);
 
     const textCenterX = rectX + rectWidth / 2;
     const textBlockHeight = (lines.length - 1) * lineHeight;
@@ -918,30 +945,102 @@ export function compactStageText(text, limit) {
 }
 
 export function wrapCanvasText(ctx, text, maxWidth, maxLines, truncate = true) {
-  const source = String(text || '').replace(/\s+/g, ' ').trim();
-  if (!source) return [''];
-  const units = Array.from(source);
-  const lines = [];
-  let line = '';
+  return layoutCanvasText(ctx, text, maxWidth, maxLines, truncate).lines;
+}
 
-  for (const unit of units) {
-    const next = `${line}${unit}`;
-    if (ctx.measureText(next).width <= maxWidth || !line) {
-      line = next;
+export function fitCanvasText(ctx, text, {
+  maxWidth,
+  maxLines,
+  fontSize,
+  minFontSize = fontSize,
+  truncate = true
+}) {
+  const minSize = Math.max(1, Math.min(fontSize, minFontSize));
+  for (let size = fontSize; size >= minSize; size -= 2) {
+    setCanvasTextFont(ctx, size);
+    const layout = layoutCanvasText(ctx, text, maxWidth, maxLines, false);
+    if (!layout.truncated && layout.lines.every((line) => ctx.measureText(line).width <= maxWidth)) {
+      return { fontSize: size, lines: layout.lines };
+    }
+  }
+
+  setCanvasTextFont(ctx, minSize);
+  return {
+    fontSize: minSize,
+    lines: layoutCanvasText(ctx, text, maxWidth, maxLines, truncate).lines
+  };
+}
+
+function layoutCanvasText(ctx, text, maxWidth, maxLines, truncate = true) {
+  const source = String(text || '')
+    .replace(/\r\n?/g, '\n')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  if (!source) return { lines: [''], truncated: false };
+  const lineLimit = Number.isFinite(maxLines) ? Math.max(1, maxLines) : Infinity;
+  const paragraphs = source.split('\n');
+  const lines = [];
+  let truncated = false;
+
+  for (let paragraphIndex = 0; paragraphIndex < paragraphs.length; paragraphIndex += 1) {
+    if (lines.length >= lineLimit) {
+      truncated = true;
+      break;
+    }
+
+    const paragraph = paragraphs[paragraphIndex];
+    if (!paragraph) {
+      lines.push('');
       continue;
     }
-    lines.push(line.trim());
-    line = unit;
-    if (truncate && lines.length === maxLines) break;
-  }
-  if (lines.length < maxLines && line) lines.push(line.trim());
-  if (truncate && lines.length > maxLines) lines.length = maxLines;
 
-  const consumed = lines.join('');
-  if (truncate && consumed.length < source.length && lines.length) {
-    lines[lines.length - 1] = `${lines[lines.length - 1].replace(/…$/, '').slice(0, -1)}…`;
+    const units = Array.from(paragraph);
+    let line = '';
+    for (let unitIndex = 0; unitIndex < units.length; unitIndex += 1) {
+      const unit = units[unitIndex];
+      const next = `${line}${unit}`;
+      if (ctx.measureText(next).width <= maxWidth || !line) {
+        line = next;
+        continue;
+      }
+
+      if (lines.length >= lineLimit) {
+        truncated = true;
+        break;
+      }
+      lines.push(line.trim());
+      line = unit;
+      if (truncate && lines.length === lineLimit) {
+        truncated = true;
+        break;
+      }
+    }
+
+    if (truncated) break;
+    if (line) {
+      if (lines.length >= lineLimit) {
+        truncated = true;
+        break;
+      }
+      lines.push(line.trim());
+    }
   }
-  return lines;
+
+  if (truncate && truncated && lines.length) {
+    lines[lines.length - 1] = fitCanvasEllipsis(ctx, lines[lines.length - 1], maxWidth);
+  }
+  return { lines: lines.length ? lines : [''], truncated };
+}
+
+function fitCanvasEllipsis(ctx, text, maxWidth) {
+  const units = Array.from(String(text || '').replace(/…$/, '').trim());
+  while (units.length && ctx.measureText(`${units.join('')}…`).width > maxWidth) units.pop();
+  return `${units.join('')}…`;
+}
+
+function setCanvasTextFont(ctx, fontSize) {
+  ctx.font = `600 ${fontSize}px ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif`;
 }
 
 function drawBubbleShape(ctx, x, y, width, height, radius, tail, tailSize) {
