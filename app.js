@@ -32,6 +32,12 @@ const AVATAR_AUDIO_RELEASE_DELAY_MS = 800;
 const VAD_PREFIX_PADDING_MS = 300;
 const USER_TURN_TRANSCRIPT_WAIT_MS = 800;
 const DIAGNOSTIC_LOG_LIMIT = 1000;
+const REALTIME_CONTEXT_PRUNE_AFTER_ITEMS = 34;
+const REALTIME_CONTEXT_KEEP_ITEMS = 28;
+const REALTIME_CONTEXT_MAX_DELETES_PER_TURN = 8;
+const REALTIME_RESPONSE_CREATE_TIMEOUT_MS = 8000;
+const REALTIME_RESPONSE_TIMEOUT_MS = 45000;
+const OUTPUT_AUDIO_STOP_TIMEOUT_MS = 20000;
 const STAGE_TRANSCRIPT_LIMIT = 4;
 const STAGE_ADVICE_TEXT_LIMIT = 96;
 const LOG_FLUSH_DELAY_MS = 900;
@@ -146,7 +152,15 @@ const state = {
   assistantResponseTimers: new Map(),
   assistantResponseMeta: new Map(),
   pendingAssistantResponseUserItems: [],
+  pendingRealtimeResponseCreate: false,
+  pendingRealtimeResponseCreateTimer: null,
+  activeRealtimeResponseIds: new Set(),
+  realtimeResponseWatchdogTimers: new Map(),
+  deferredUserResponseTurnId: '',
   activeAssistantAudioResponseIds: new Set(),
+  outputAudioStopWatchdogTimers: new Map(),
+  realtimeConversationItems: new Map(),
+  realtimeConversationSeq: 0,
   microphoneRestoreTimer: null,
   processedAssistantResponseKeys: new Set(),
   processedAssistantResponses: new Set(),
@@ -1620,12 +1634,19 @@ function handleRealtimeEvent(event, sessionId) {
     case 'response.created':
       handleResponseCreated(event);
       break;
+    case 'response.content_part.added':
+      markAssistantAudioExpected(event, sessionId);
+      break;
     case 'conversation.item.created':
     case 'conversation.item.added':
-    case 'conversation.item.retrieved': {
+    case 'conversation.item.retrieved':
+    case 'conversation.item.done': {
       handleConversationItem(event, sessionId);
       break;
     }
+    case 'conversation.item.deleted':
+      forgetRealtimeConversationItem(event.item_id);
+      break;
     case 'conversation.item.input_audio_transcription.delta':
     case 'conversation.item.audio_transcription.delta':
       appendUserTranscriptDelta(event);
@@ -1644,9 +1665,9 @@ function handleRealtimeEvent(event, sessionId) {
       });
       break;
     case 'output_audio_buffer.started':
+      markAssistantAudioExpected(event, sessionId);
       state.avatarSpeaking = true;
       clearTimeout(state.microphoneRestoreTimer);
-      state.activeAssistantAudioResponseIds.add(audioOutputKey(event));
       setMicrophoneTracksEnabled(false, 'avatar_speaking');
       setAvatarMood('speaking');
       setConnectionStatus('avatar speaking');
@@ -1663,8 +1684,10 @@ function handleRealtimeEvent(event, sessionId) {
     case 'output_audio_buffer.stopped':
       if (event.response_id || event.item_id) {
         state.activeAssistantAudioResponseIds.delete(audioOutputKey(event));
+        clearOutputAudioStopWatchdog(audioOutputKey(event));
       } else {
         state.activeAssistantAudioResponseIds.clear();
+        clearAllOutputAudioStopWatchdogs();
       }
       finishAvatarAudioOutput(sessionId, 'avatar_finished');
       updateAssistantResponseMeta(event.response_id, {
@@ -1676,6 +1699,7 @@ function handleRealtimeEvent(event, sessionId) {
     case 'response.audio_transcript.delta':
     case 'response.output_text.delta':
     case 'response.text.delta': {
+      if (event.type.includes('audio_transcript')) markAssistantAudioExpected(event, sessionId);
       const key = responseContentKey(event);
       const nextText = `${state.assistantTextByResponse.get(key) || ''}${event.delta || ''}`;
       state.assistantTextByResponse.set(key, nextText);
@@ -1686,6 +1710,7 @@ function handleRealtimeEvent(event, sessionId) {
     case 'response.audio_transcript.done':
     case 'response.output_text.done':
     case 'response.text.done': {
+      if (event.type.includes('audio_transcript')) markAssistantAudioExpected(event, sessionId);
       const contentKey = responseContentKey(event);
       const doneKey = responseDoneKey(event, contentKey);
       if (state.processedAssistantResponseKeys.has(doneKey)) {
@@ -1706,14 +1731,19 @@ function handleRealtimeEvent(event, sessionId) {
       break;
     }
     case 'response.done':
+      markRealtimeResponseDone(event.response?.id || event.response_id);
       updateAssistantResponseMeta(event.response?.id || event.response_id, responseMetaFromDoneEvent(event));
       flushAssistantResponse(event.response?.id || event.response_id, sessionId, 'response_done');
       finishAvatarAudioOutput(sessionId, 'response_done');
       break;
     case 'error':
     case 'session.error':
+      state.pendingRealtimeResponseCreate = false;
+      clearTimeout(state.pendingRealtimeResponseCreateTimer);
+      state.pendingRealtimeResponseCreateTimer = null;
       addAdvice('app', `Realtime error: ${event.error?.message || JSON.stringify(event.error || event)}`, 'risk');
       setAvatarMood('caution');
+      finishAvatarAudioOutput(sessionId, 'realtime_error');
       break;
     default:
       break;
@@ -1779,6 +1809,44 @@ function responseDoneKey(event, contentKey) {
 
 function audioOutputKey(event) {
   return event.response_id || event.item_id || 'active-output-audio';
+}
+
+function markAssistantAudioExpected(event, sessionId = state.activeRealtimeSessionId) {
+  const partType = event.part?.type || event.content?.type || '';
+  const isAudioEvent = String(event.type || '').includes('audio') || partType === 'audio' || partType === 'output_audio';
+  if (!isAudioEvent) return;
+  const key = audioOutputKey(event);
+  if (!key || key === 'active-output-audio') return;
+  state.activeAssistantAudioResponseIds.add(key);
+  if (String(event.type || '').includes('started')) return;
+  scheduleOutputAudioStopWatchdog(key, sessionId);
+}
+
+function scheduleOutputAudioStopWatchdog(key, sessionId = state.activeRealtimeSessionId) {
+  if (!key) return;
+  clearTimeout(state.outputAudioStopWatchdogTimers.get(key));
+  state.outputAudioStopWatchdogTimers.set(key, setTimeout(() => {
+    if (!isActiveRealtimeSession(sessionId) || !state.activeAssistantAudioResponseIds.has(key)) return;
+    state.activeAssistantAudioResponseIds.delete(key);
+    state.outputAudioStopWatchdogTimers.delete(key);
+    logEvent({
+      type: 'client.output_audio_stop_watchdog_released',
+      sessionId,
+      key,
+      timeoutMs: OUTPUT_AUDIO_STOP_TIMEOUT_MS
+    });
+    finishAvatarAudioOutput(sessionId, 'output_audio_stop_watchdog');
+  }, OUTPUT_AUDIO_STOP_TIMEOUT_MS));
+}
+
+function clearOutputAudioStopWatchdog(key) {
+  clearTimeout(state.outputAudioStopWatchdogTimers.get(key));
+  state.outputAudioStopWatchdogTimers.delete(key);
+}
+
+function clearAllOutputAudioStopWatchdogs() {
+  for (const timer of state.outputAudioStopWatchdogTimers.values()) clearTimeout(timer);
+  state.outputAudioStopWatchdogTimers.clear();
 }
 
 function startUserTurn(event) {
@@ -1945,7 +2013,23 @@ function ignoreUserTurn(turn, sessionId, reason) {
 
 function sendManualResponseCreate(turn, sessionId, reason) {
   if (turn.responseSent || !isActiveRealtimeSession(sessionId) || state.dataChannel?.readyState !== 'open') return;
+  if (hasActiveRealtimeResponse()) {
+    turn.responseDeferred = true;
+    state.userTurnByItem.set(turn.itemId, turn);
+    state.deferredUserResponseTurnId = turn.itemId;
+    logEvent({
+      type: 'client.manual_response_create_deferred',
+      sessionId,
+      item_id: turn.itemId,
+      reason,
+      pendingCreate: Boolean(state.pendingRealtimeResponseCreate),
+      activeResponses: state.activeRealtimeResponseIds.size,
+      avatarSpeaking: Boolean(state.avatarSpeaking)
+    });
+    return;
+  }
   turn.responseSent = true;
+  turn.responseDeferred = false;
   state.userTurnByItem.set(turn.itemId, turn);
   state.lastResponseStartedAt = performance.now();
   state.pendingAssistantResponseUserItems.push({
@@ -1953,13 +2037,90 @@ function sendManualResponseCreate(turn, sessionId, reason) {
     perfAt: state.userItemSpeechStoppedAt.get(turn.itemId) || turn.perfStoppedAt || performance.now()
   });
   if (state.pendingAssistantResponseUserItems.length > 20) state.pendingAssistantResponseUserItems.shift();
-  state.dataChannel.send(JSON.stringify({ type: 'response.create' }));
+  pruneRealtimeConversationBeforeResponse(sessionId, turn.itemId);
+  state.pendingRealtimeResponseCreate = true;
+  clearTimeout(state.pendingRealtimeResponseCreateTimer);
+  state.pendingRealtimeResponseCreateTimer = setTimeout(() => {
+    if (!isActiveRealtimeSession(sessionId) || !state.pendingRealtimeResponseCreate) return;
+    state.pendingRealtimeResponseCreate = false;
+    state.pendingRealtimeResponseCreateTimer = null;
+    logEvent({
+      type: 'client.realtime_response_create_timeout',
+      sessionId,
+      item_id: turn.itemId,
+      timeoutMs: REALTIME_RESPONSE_CREATE_TIMEOUT_MS
+    });
+    addAdvice('app', 'Realtime応答の開始イベントが返らなかったため、入力待ちへ戻しました。', 'warn');
+    finishAvatarAudioOutput(sessionId, 'response_create_timeout');
+  }, REALTIME_RESPONSE_CREATE_TIMEOUT_MS);
+  setMicrophoneTracksEnabled(false, 'response_pending', sessionId);
+  state.dataChannel.send(JSON.stringify({
+    type: 'response.create',
+    response: {
+      cancel_previous: true
+    }
+  }));
   logEvent({
     type: 'client.manual_response_create_sent',
     sessionId,
     item_id: turn.itemId,
     reason
   });
+}
+
+function hasActiveRealtimeResponse() {
+  return state.pendingRealtimeResponseCreate
+    || state.activeRealtimeResponseIds.size > 0
+    || state.activeAssistantAudioResponseIds.size > 0
+    || state.avatarSpeaking;
+}
+
+function sendDeferredManualResponseCreate(sessionId, reason) {
+  if (!isActiveRealtimeSession(sessionId) || !state.deferredUserResponseTurnId || hasActiveRealtimeResponse()) return false;
+  const itemId = state.deferredUserResponseTurnId;
+  state.deferredUserResponseTurnId = '';
+  const turn = state.userTurnByItem.get(itemId);
+  if (!turn || turn.ignored || turn.responseSent) return false;
+  sendManualResponseCreate(turn, sessionId, reason);
+  return true;
+}
+
+function pruneRealtimeConversationBeforeResponse(sessionId, currentItemId) {
+  if (!isActiveRealtimeSession(sessionId) || state.dataChannel?.readyState !== 'open') return;
+  const candidates = Array.from(state.realtimeConversationItems.values())
+    .filter((item) => !item.deleteRequested)
+    .filter((item) => item.id && item.id !== currentItemId)
+    .filter((item) => item.role === 'user' || item.role === 'assistant')
+    .sort((a, b) => a.seq - b.seq);
+
+  if (candidates.length <= REALTIME_CONTEXT_PRUNE_AFTER_ITEMS) return;
+
+  const keepIds = new Set(candidates.slice(-REALTIME_CONTEXT_KEEP_ITEMS).map((item) => item.id));
+  keepIds.add(currentItemId);
+  const deleteItems = candidates
+    .filter((item) => !keepIds.has(item.id))
+    .filter((item) => !item.status || item.status === 'completed')
+    .slice(0, REALTIME_CONTEXT_MAX_DELETES_PER_TURN);
+
+  for (const item of deleteItems) {
+    const tracked = state.realtimeConversationItems.get(item.id);
+    if (tracked) {
+      tracked.deleteRequested = true;
+      state.realtimeConversationItems.set(item.id, tracked);
+    }
+    state.dataChannel.send(JSON.stringify({ type: 'conversation.item.delete', item_id: item.id }));
+  }
+
+  if (deleteItems.length) {
+    logEvent({
+      type: 'client.realtime_context_prune_sent',
+      sessionId,
+      currentItemId,
+      trackedItems: candidates.length,
+      deleteItems: deleteItems.length,
+      keepItems: REALTIME_CONTEXT_KEEP_ITEMS
+    });
+  }
 }
 
 function deleteConversationItem(itemId, sessionId, reason) {
@@ -1994,6 +2155,7 @@ function userTranscriptKey(event) {
 
 function handleConversationItem(event, sessionId) {
   const item = event.item || {};
+  trackRealtimeConversationItem(event);
   if (item.role !== 'user' || !Array.isArray(item.content)) return;
   if (item.id) {
     const turn = ensureUserTurn(item.id);
@@ -2014,6 +2176,27 @@ function handleConversationItem(event, sessionId) {
       logEvent({ type: 'client.user_audio_pending_transcript', item_id: item.id || null, content_index: index });
     }
   }
+}
+
+function trackRealtimeConversationItem(event) {
+  const item = event.item || {};
+  if (!item.id) return;
+  const previous = state.realtimeConversationItems.get(item.id) || {};
+  state.realtimeConversationItems.set(item.id, {
+    ...previous,
+    id: item.id,
+    role: item.role || previous.role || '',
+    type: item.type || previous.type || '',
+    status: item.status || previous.status || '',
+    previousItemId: event.previous_item_id || previous.previousItemId || '',
+    seq: previous.seq || ++state.realtimeConversationSeq,
+    deleteRequested: Boolean(previous.deleteRequested)
+  });
+}
+
+function forgetRealtimeConversationItem(itemId) {
+  if (!itemId) return;
+  state.realtimeConversationItems.delete(itemId);
 }
 
 function appendUserTranscriptDelta(event) {
@@ -2105,12 +2288,47 @@ function publishUserTranscript(key, itemId, text, sessionId, reason, diagnostics
 function handleResponseCreated(event) {
   const responseId = event.response?.id || event.response_id;
   if (!responseId) return;
+  state.pendingRealtimeResponseCreate = false;
+  clearTimeout(state.pendingRealtimeResponseCreateTimer);
+  state.pendingRealtimeResponseCreateTimer = null;
+  state.activeRealtimeResponseIds.add(responseId);
+  scheduleRealtimeResponseWatchdog(responseId);
   const pending = state.pendingAssistantResponseUserItems.shift() || {};
   updateAssistantResponseMeta(responseId, {
     userItemId: pending.itemId || '',
     userPerfAt: Number(pending.perfAt) || state.lastSpeechStoppedAt || 0,
     responseCreatedAt: performance.now()
   });
+}
+
+function markRealtimeResponseDone(responseId) {
+  if (responseId) state.activeRealtimeResponseIds.delete(responseId);
+  state.pendingRealtimeResponseCreate = false;
+  clearTimeout(state.pendingRealtimeResponseCreateTimer);
+  state.pendingRealtimeResponseCreateTimer = null;
+  if (responseId) {
+    clearTimeout(state.realtimeResponseWatchdogTimers.get(responseId));
+    state.realtimeResponseWatchdogTimers.delete(responseId);
+  }
+}
+
+function scheduleRealtimeResponseWatchdog(responseId, sessionId = state.activeRealtimeSessionId) {
+  clearTimeout(state.realtimeResponseWatchdogTimers.get(responseId));
+  state.realtimeResponseWatchdogTimers.set(responseId, setTimeout(() => {
+    if (!isActiveRealtimeSession(sessionId) || !state.activeRealtimeResponseIds.has(responseId)) return;
+    state.activeRealtimeResponseIds.delete(responseId);
+    state.activeAssistantAudioResponseIds.delete(responseId);
+    clearOutputAudioStopWatchdog(responseId);
+    state.realtimeResponseWatchdogTimers.delete(responseId);
+    logEvent({
+      type: 'client.realtime_response_watchdog_released',
+      sessionId,
+      responseId,
+      timeoutMs: REALTIME_RESPONSE_TIMEOUT_MS
+    });
+    addAdvice('app', 'Realtime応答が完了イベントを返さないまま停止したため、入力待ちへ戻しました。', 'warn');
+    finishAvatarAudioOutput(sessionId, 'response_watchdog');
+  }, REALTIME_RESPONSE_TIMEOUT_MS));
 }
 
 function recordAssistantResponsePart(event, contentKey, text) {
@@ -2323,8 +2541,9 @@ function finishAvatarAudioOutput(sessionId, reason) {
   setAvatarMood('neutral');
   setConnectionStatus('connected');
   clearTimeout(state.microphoneRestoreTimer);
+  if (sendDeferredManualResponseCreate(sessionId, reason)) return;
   state.microphoneRestoreTimer = setTimeout(() => {
-    if (!isActiveRealtimeSession(sessionId) || state.activeAssistantAudioResponseIds.size) return;
+    if (!isActiveRealtimeSession(sessionId) || state.activeAssistantAudioResponseIds.size || hasActiveRealtimeResponse()) return;
     setMicrophoneTracksEnabled(true, reason);
   }, AVATAR_AUDIO_RELEASE_DELAY_MS);
 }
@@ -2395,7 +2614,17 @@ async function stopRealtime(showMessage = true, sessionId = state.activeRealtime
   state.assistantResponseParts.clear();
   state.assistantResponseMeta.clear();
   state.pendingAssistantResponseUserItems = [];
+  state.pendingRealtimeResponseCreate = false;
+  clearTimeout(state.pendingRealtimeResponseCreateTimer);
+  state.pendingRealtimeResponseCreateTimer = null;
+  for (const timer of state.realtimeResponseWatchdogTimers.values()) clearTimeout(timer);
+  state.realtimeResponseWatchdogTimers.clear();
+  state.activeRealtimeResponseIds.clear();
+  state.deferredUserResponseTurnId = '';
   state.activeAssistantAudioResponseIds.clear();
+  clearAllOutputAudioStopWatchdogs();
+  state.realtimeConversationItems.clear();
+  state.realtimeConversationSeq = 0;
   state.processedAssistantResponseKeys.clear();
   state.processedAssistantResponses.clear();
   state.userTextByItem.clear();
