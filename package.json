@@ -5,6 +5,7 @@
   "description": "Static frontend for ZatsuCoach MVP",
   "scripts": {
     "build": "node scripts/build-static.js",
+    "test": "node --test",
     "smoke:conversation": "node scripts/realtime-conversation-smoke.js"
   },
   "devDependencies": {
