@@ -16,8 +16,10 @@ module.exports = async function (context, req) {
     const body = parseJsonBody(req);
     const email = String(body.email || '').trim().toLowerCase();
     const password = String(body.password || '');
+    const trialNoticeAccepted = body.trialNoticeAccepted === true;
 
     if (!email || !password) throw new HttpError(400, 'email and password are required');
+    if (!trialNoticeAccepted) throw new HttpError(400, 'trial notice acceptance is required', { code: 'trial_notice_required' });
     if (!verifyDemoCredentials(email, password)) throw new HttpError(401, 'invalid email or password');
 
     context.res = {

@@ -50,7 +50,15 @@
         <p>Microsoft アカウント、またはデモ用 Email/Password でログインしてください。</p>
       </div>
 
-      <a class="button primary loginMicrosoft" href="/.auth/login/aad?post_login_redirect_uri=/">Microsoft でログイン</a>
+      <div class="trialNotice">
+        <p>6月10日または予算に到達するまでは無料で利用可能です。ただし、会話の内容も含め、ログはすべて開発者が閲覧可能であることはご承知おき下さい</p>
+        <label class="consentCheck">
+          <input id="trialConsent" type="checkbox" />
+          <span>上記注意事項を了承し、かつ、一切の保証がないことを理解した上で試用する</span>
+        </label>
+      </div>
+
+      <a id="loginMicrosoft" class="button primary loginMicrosoft is-disabled" href="/.auth/login/aad?post_login_redirect_uri=/" aria-disabled="true">Microsoft でログイン</a>
 
       <form id="emailLoginForm" class="emailLoginForm">
         <label>
@@ -61,7 +69,7 @@
           Password
           <input id="loginPassword" name="password" type="password" autocomplete="current-password" required />
         </label>
-        <button id="btnEmailLogin" class="primary" type="submit">Email でログイン</button>
+        <button id="btnEmailLogin" class="primary" type="submit" disabled>Email でログイン</button>
         <div id="loginError" class="loginError" role="alert"></div>
       </form>
     </div>

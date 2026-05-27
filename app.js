@@ -63,9 +63,12 @@ const els = {
   stageLoading: document.getElementById('stageLoading'),
   stageLoadingText: document.getElementById('stageLoadingText'),
   loginView: document.getElementById('loginView'),
+  loginMicrosoft: document.getElementById('loginMicrosoft'),
   emailLoginForm: document.getElementById('emailLoginForm'),
   loginEmail: document.getElementById('loginEmail'),
   loginPassword: document.getElementById('loginPassword'),
+  trialConsent: document.getElementById('trialConsent'),
+  btnEmailLogin: document.getElementById('btnEmailLogin'),
   loginError: document.getElementById('loginError'),
   publicClosedNotice: document.getElementById('publicClosedNotice'),
   accountStatus: document.getElementById('accountStatus'),
@@ -359,6 +362,8 @@ function renderAuthState() {
 
 async function loginWithEmail(event) {
   event.preventDefault();
+  if (!requireTrialConsent()) return;
+
   const email = els.loginEmail.value.trim();
   const password = els.loginPassword.value;
   if (els.loginError) els.loginError.textContent = '';
@@ -367,7 +372,7 @@ async function loginWithEmail(event) {
     const response = await fetch('/api/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, password })
+      body: JSON.stringify({ email, password, trialNoticeAccepted: true })
     });
     const data = await safeJson(response);
     if (!response.ok) throw new Error(data.error || `login failed: ${response.status}`);
@@ -375,6 +380,30 @@ async function loginWithEmail(event) {
     await loadAuthState();
   } catch (error) {
     if (els.loginError) els.loginError.textContent = 'ログインできません。Email と Password を確認してください。';
+  }
+}
+
+function trialConsentAccepted() {
+  return Boolean(els.trialConsent?.checked);
+}
+
+function requireTrialConsent() {
+  if (trialConsentAccepted()) return true;
+  if (els.loginError) els.loginError.textContent = '注意事項への同意が必要です。';
+  els.trialConsent?.focus();
+  return false;
+}
+
+function renderLoginConsentState() {
+  const accepted = trialConsentAccepted();
+  if (els.btnEmailLogin) els.btnEmailLogin.disabled = !accepted;
+  if (els.loginMicrosoft) {
+    els.loginMicrosoft.classList.toggle('is-disabled', !accepted);
+    els.loginMicrosoft.setAttribute('aria-disabled', accepted ? 'false' : 'true');
+    els.loginMicrosoft.tabIndex = accepted ? 0 : -1;
+  }
+  if (accepted && els.loginError?.textContent === '注意事項への同意が必要です。') {
+    els.loginError.textContent = '';
   }
 }
 
@@ -489,6 +518,11 @@ function fillSettingsForm() {
 
 function wireEvents() {
   els.emailLoginForm.addEventListener('submit', loginWithEmail);
+  els.trialConsent.addEventListener('change', renderLoginConsentState);
+  els.loginMicrosoft.addEventListener('click', (event) => {
+    if (!requireTrialConsent()) event.preventDefault();
+  });
+  renderLoginConsentState();
   els.btnConnect.addEventListener('click', startRealtime);
   els.btnDisconnect.addEventListener('click', stopRealtime);
   els.btnSendText.addEventListener('click', sendText);
