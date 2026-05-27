@@ -1,10 +1,9 @@
 import {
-  STAGE_ADVICE_TEXT_LIMIT,
   STAGE_BUBBLE_AVATAR_GAP_PX,
   STAGE_BUBBLE_EDGE_INSET_PX,
   STAGE_TRANSCRIPT_LIMIT,
   calculateStageBubbleMaxWidth,
-  compactStageText,
+  calculateVRPanelDepth,
   drawBubbleShape,
   fitCanvasText,
   normalizeStageText,
@@ -14,14 +13,14 @@ import {
 
 export {
   calculateStageBubbleMaxWidth,
-  compactStageText,
+  calculateVRPanelDepth,
   drawBubbleShape,
   fitCanvasText,
   normalizeStageText,
   wrapCanvasText
 } from './avatarStageUtils.mjs';
 
-const AVATAR_VRM_URL = './assets/8590256991748008892.vrm';
+const AVATAR_VRM_URL = './assets/8590256991748008892.lite-2048-1024.vrm';
 const AVATAR_VRMA_URL = './assets/relaxed_stand_idle_1s_skeleton_only_human_breath.vrma';
 const OFFICE_BACKGROUND_URL = './assets/minimal_office_background_v2.glb';
 const STAGE_CAMERA_FOV = 30;
@@ -49,6 +48,7 @@ let VRMLookAtQuaternionProxy = null;
 export function createAvatarStage({
   elements,
   onAdvice = () => {},
+  onDiagnosticEvent = () => {},
   onLoadingChange = () => {},
   onVRSessionRequested = () => {},
   onVRSessionStart = () => {}
@@ -88,6 +88,7 @@ export function createAvatarStage({
     lipData: null,
     avatarSpeaking: false,
     conversation: [],
+    rendererProfile: null,
     avatarLoading: true,
     avatarLoadingText: 'アバターを読み込んでいます'
   };
@@ -110,8 +111,14 @@ export function createAvatarStage({
     resetStageCamera(camera, cameraRig);
     cameraRig.add(camera);
 
-    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    const rendererProfile = getRendererProfile();
+    const renderer = new THREE.WebGLRenderer({
+      antialias: rendererProfile.antialias,
+      alpha: false,
+      powerPreference: 'high-performance',
+      precision: rendererProfile.precision
+    });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, rendererProfile.maxPixelRatio));
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = 1.08;
@@ -146,6 +153,7 @@ export function createAvatarStage({
       camera,
       cameraRig,
       renderer,
+      rendererProfile,
       controls,
       fallbackFloor: floor,
       clock: new THREE.Clock(),
@@ -161,7 +169,7 @@ export function createAvatarStage({
     }
     resizeStageRenderer();
 
-    loadVRM(AVATAR_VRM_URL);
+    void loadVRM(AVATAR_VRM_URL);
     renderer.setAnimationLoop(renderLoop);
   }
 
@@ -414,14 +422,31 @@ export function createAvatarStage({
     });
   }
 
-  function loadVRM(url) {
+  async function loadVRM(url) {
     setLoading(true, 'アバターを読み込んでいます');
     setStatus('avatar: loading VRM');
     const loader = new GLTFLoader();
     loader.register((parser) => new VRMLoaderPlugin(parser));
-    loader.load(url, (gltf) => {
+    const startedAt = performance.now();
+    emitAvatarLoadEvent('start', { url, rendererProfile: state.rendererProfile });
+    try {
+      const { arrayBuffer, bytes } = await fetchArrayBufferWithProgress(url, (loaded, total) => {
+        if (!total) {
+          setStatus('avatar: downloading');
+          return;
+        }
+        const pct = Math.round((loaded / total) * 100);
+        setStatus(`avatar: downloading ${pct}%`);
+        setLoading(true, `アバターを読み込んでいます (${pct}%)`);
+      });
+      const downloadedAt = performance.now();
+      setStatus('avatar: parsing VRM');
+      setLoading(true, 'アバターを展開しています');
+      const gltf = await parseGltf(loader, arrayBuffer, url);
+      const parsedAt = performance.now();
       const vrm = gltf.userData.vrm;
       if (!vrm) throw new Error('VRM not found in glTF userData.');
+      optimizeLoadedVRM(vrm);
       THREE_VRM.VRMUtils?.rotateVRM0?.(vrm);
       state.scene.add(vrm.scene);
       state.vrm = vrm;
@@ -431,27 +456,45 @@ export function createAvatarStage({
       scheduleInitialBubbleLayout();
       setStatus('avatar: ready');
       setMood('neutral');
-      loadVRMA(AVATAR_VRMA_URL, vrm);
-    }, (progress) => {
-      if (progress.total) {
-        const pct = Math.round((progress.loaded / progress.total) * 100);
-        setStatus(`avatar: loading ${pct}%`);
-        setLoading(true, `アバターを読み込んでいます (${pct}%)`);
-      }
-    }, (error) => {
+      const readyAt = performance.now();
+      emitAvatarLoadEvent('ready', {
+        url,
+        bytes,
+        downloadMs: Math.round(downloadedAt - startedAt),
+        parseMs: Math.round(parsedAt - downloadedAt),
+        postprocessMs: Math.round(readyAt - parsedAt),
+        totalMs: Math.round(readyAt - startedAt),
+        rendererProfile: state.rendererProfile
+      });
+      void loadVRMA(AVATAR_VRMA_URL, vrm);
+    } catch (error) {
       console.error(error);
       setLoading(false);
       setStatus('avatar: load failed');
+      emitAvatarLoadEvent('failed', {
+        url,
+        totalMs: Math.round(performance.now() - startedAt),
+        message: error.message || String(error)
+      });
       onAdvice('app', `VRMの読み込みに失敗しました: ${error.message || error}`, 'risk');
-    });
+    }
   }
 
-  function loadVRMA(url, vrm) {
+  async function loadVRMA(url, vrm) {
     setLoading(true, 'アバターの待機モーションを読み込んでいます');
     setStatus('avatar: loading animation');
     const loader = new GLTFLoader();
     loader.register((parser) => new VRMAnimationLoaderPlugin(parser));
-    loader.load(url, (gltf) => {
+    const startedAt = performance.now();
+    try {
+      const { arrayBuffer, bytes } = await fetchArrayBufferWithProgress(url, (loaded, total) => {
+        if (!total) return;
+        const pct = Math.round((loaded / total) * 100);
+        setStatus(`avatar: animation ${pct}%`);
+        setLoading(true, `アバターの待機モーションを読み込んでいます (${pct}%)`);
+      });
+      const downloadedAt = performance.now();
+      const gltf = await parseGltf(loader, arrayBuffer, url);
       const vrmAnimation = gltf.userData.vrmAnimations?.[0];
       if (!vrmAnimation) throw new Error('VRMA not found in glTF userData.');
       const clip = createVRMAnimationClip(vrmAnimation, vrm);
@@ -465,17 +508,38 @@ export function createAvatarStage({
       vrm.humanoid?.resetNormalizedPose?.();
       setStatus('avatar: ready + reading loop');
       setLoading(false);
-    }, (progress) => {
-      if (progress.total) {
-        const pct = Math.round((progress.loaded / progress.total) * 100);
-        setStatus(`avatar: animation ${pct}%`);
-        setLoading(true, `アバターの待機モーションを読み込んでいます (${pct}%)`);
-      }
-    }, (error) => {
+      emitAvatarLoadEvent('animation_ready', {
+        url,
+        bytes,
+        downloadMs: Math.round(downloadedAt - startedAt),
+        parseMs: Math.round(performance.now() - downloadedAt),
+        totalMs: Math.round(performance.now() - startedAt)
+      });
+    } catch (error) {
       console.error(error);
       setLoading(false);
       setStatus('avatar: ready, animation failed');
+      emitAvatarLoadEvent('animation_failed', {
+        url,
+        totalMs: Math.round(performance.now() - startedAt),
+        message: error.message || String(error)
+      });
       onAdvice('app', `VRMAの読み込みに失敗しました: ${error.message || error}`, 'warn');
+    }
+  }
+
+  function optimizeLoadedVRM(vrm) {
+    const utils = THREE_VRM.VRMUtils;
+    utils?.removeUnnecessaryVertices?.(vrm.scene);
+    utils?.combineSkeletons?.(vrm.scene);
+    utils?.combineMorphs?.(vrm);
+  }
+
+  function emitAvatarLoadEvent(stage, detail = {}) {
+    onDiagnosticEvent({
+      type: 'client.avatar_load',
+      stage,
+      ...detail
     });
   }
 
@@ -590,10 +654,19 @@ export function createAvatarStage({
     if (!state.vrConversationGroup || !state.vrHudGroup) return;
     clearVRConversationPanels();
 
+    const visibleConversation = state.conversation.slice(-STAGE_TRANSCRIPT_LIMIT);
+    const rolePanelCounts = visibleConversation.reduce((counts, item) => {
+      const role = item.role === 'user' ? 'user' : 'assistant';
+      counts[role] += 1;
+      return counts;
+    }, { user: 0, assistant: 0 });
+    const rolePanelIndexes = { user: 0, assistant: 0 };
     let avatarRow = 0;
     let userRow = 0;
-    for (const item of state.conversation.slice(-STAGE_TRANSCRIPT_LIMIT)) {
+    for (const [globalIndex, item] of visibleConversation.entries()) {
       const role = item.role === 'user' ? 'user' : 'assistant';
+      const rolePanelIndex = rolePanelIndexes[role];
+      rolePanelIndexes[role] += 1;
       const avatarBubbleWidth = state.vrAvatarBubbleWidth || VR_AVATAR_BUBBLE_DEFAULT_WIDTH;
       const mesh = createVRTextPanel(normalizeStageText(item.text), {
         role,
@@ -605,14 +678,22 @@ export function createAvatarStage({
         background: role === 'user' ? '#b8f20d' : '#f7f8f4',
         color: '#141820'
       });
-      mesh.renderOrder = 30;
+      mesh.renderOrder = 30 + globalIndex;
 
       if (role === 'user') {
-        mesh.position.set(0.48, 0.25 - userRow * 0.22, -1.35);
+        mesh.position.set(
+          0.48,
+          0.25 - userRow * 0.22,
+          calculateVRPanelDepth(-1.35, rolePanelIndex, rolePanelCounts.user)
+        );
         state.vrHudGroup.add(mesh);
         userRow += 1;
       } else {
-        mesh.position.set(state.vrAvatarBubbleX || VR_AVATAR_BUBBLE_DEFAULT_X, 1.72 - avatarRow * 0.28, VR_AVATAR_BUBBLE_DEFAULT_Z);
+        mesh.position.set(
+          state.vrAvatarBubbleX || VR_AVATAR_BUBBLE_DEFAULT_X,
+          1.72 - avatarRow * 0.28,
+          calculateVRPanelDepth(VR_AVATAR_BUBBLE_DEFAULT_Z, rolePanelIndex, rolePanelCounts.assistant)
+        );
         mesh.userData.billboardToCamera = true;
         state.vrConversationGroup.add(mesh);
         avatarRow += 1;
@@ -630,7 +711,7 @@ export function createAvatarStage({
   }
 
   function setAdvice(text) {
-    const displayText = compactStageText(text, STAGE_ADVICE_TEXT_LIMIT) || 'アドバイス';
+    const displayText = normalizeStageText(text) || 'アドバイス';
     if (els.stageAdviceOverlay) els.stageAdviceOverlay.textContent = displayText;
     updateVRAdvicePanel(displayText);
   }
@@ -646,17 +727,19 @@ export function createAvatarStage({
 
     const mesh = createVRTextPanel(state.latestVRAdviceText, {
       role: 'advice',
-      width: 1.25,
-      height: 0.23,
-      fontSize: 50,
-      minFontSize: 32,
+      width: 1.48,
+      height: 0.32,
+      fontSize: 44,
+      minFontSize: 28,
       maxLines: 4,
       fitText: true,
+      truncate: false,
       tail: 'none',
+      textAlign: 'left',
       background: '#fbfbf6',
       color: '#151922'
     });
-    mesh.position.set(0, -0.43, -1.45);
+    mesh.position.set(0, -0.43, calculateVRPanelDepth(-1.45, 0, 1));
     mesh.renderOrder = 40;
     state.vrHudGroup.add(mesh);
     state.vrAdviceMesh = mesh;
@@ -708,15 +791,16 @@ export function createAvatarStage({
 
     ctx.shadowColor = 'transparent';
     ctx.fillStyle = options.color;
-    ctx.textAlign = 'center';
+    const textAlign = options.textAlign === 'left' ? 'left' : 'center';
+    ctx.textAlign = textAlign;
     ctx.textBaseline = 'middle';
     setCanvasTextFont(ctx, fontSize);
 
-    const textCenterX = rectX + rectWidth / 2;
+    const textX = textAlign === 'left' ? rectX + paddingX : rectX + rectWidth / 2;
     const textBlockHeight = (lines.length - 1) * lineHeight;
     const textStartY = paddingY + (bodyCanvasHeight - paddingY * 2 - textBlockHeight) / 2;
     lines.forEach((line, index) => {
-      ctx.fillText(line, textCenterX, textStartY + index * lineHeight);
+      ctx.fillText(line, textX, textStartY + index * lineHeight);
     });
 
     const texture = new THREE.CanvasTexture(canvas);
@@ -938,4 +1022,62 @@ async function loadRenderingModules() {
   createVRMAnimationClip = vrmAnimationModule.createVRMAnimationClip;
   VRMAnimationLoaderPlugin = vrmAnimationModule.VRMAnimationLoaderPlugin;
   VRMLookAtQuaternionProxy = vrmAnimationModule.VRMLookAtQuaternionProxy;
+}
+
+function getRendererProfile() {
+  const lowPower = isLowPowerRendererDevice();
+  return {
+    name: lowPower ? 'low-power' : 'desktop',
+    antialias: !lowPower,
+    maxPixelRatio: lowPower ? 1 : 2,
+    precision: lowPower ? 'mediump' : 'highp'
+  };
+}
+
+function isLowPowerRendererDevice() {
+  const userAgent = navigator.userAgent || '';
+  if (/Quest|OculusBrowser|MetaQuest/i.test(userAgent)) return true;
+  const deviceMemory = Number(navigator.deviceMemory || 0);
+  if (deviceMemory > 0 && deviceMemory <= 4) return true;
+  const hardwareConcurrency = Number(navigator.hardwareConcurrency || 0);
+  return hardwareConcurrency > 0 && hardwareConcurrency <= 6;
+}
+
+async function fetchArrayBufferWithProgress(url, onProgress = () => {}) {
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`failed to fetch ${url}: ${response.status}`);
+
+  const total = Number(response.headers.get('Content-Length')) || 0;
+  if (!response.body?.getReader) {
+    const arrayBuffer = await response.arrayBuffer();
+    onProgress(arrayBuffer.byteLength, total || arrayBuffer.byteLength);
+    return { arrayBuffer, bytes: arrayBuffer.byteLength };
+  }
+
+  const reader = response.body.getReader();
+  const chunks = [];
+  let loaded = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    loaded += value.byteLength;
+    onProgress(loaded, total);
+  }
+
+  const output = new Uint8Array(loaded);
+  let offset = 0;
+  for (const chunk of chunks) {
+    output.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return { arrayBuffer: output.buffer, bytes: loaded };
+}
+
+function parseGltf(loader, arrayBuffer, url) {
+  const baseUrl = new URL(url, window.location.href);
+  const resourcePath = baseUrl.href.slice(0, baseUrl.href.lastIndexOf('/') + 1);
+  return new Promise((resolve, reject) => {
+    loader.parse(arrayBuffer, resourcePath, resolve, reject);
+  });
 }

@@ -1,4 +1,4 @@
-import { compactStageText, createAvatarStage } from './avatarStage.mjs';
+import { createAvatarStage } from './avatarStage.mjs';
 import {
   ADVISOR_TRANSCRIPT_GRACE_MS,
   DEVELOPER_ONLY_TABS,
@@ -29,7 +29,7 @@ import {
   transcriptTimingMeta
 } from './appUtils.mjs';
 import { createCoachAdviceClient } from './coachAdviceClient.mjs';
-import { createConversationLogClient } from './conversationLogClient.mjs';
+import { createConversationLogClient, defaultTitleSummary } from './conversationLogClient.mjs';
 import { createRealtimeConversationEngine } from './realtimeConversationEngine.mjs';
 
 const defaultSettings = Object.freeze({
@@ -127,6 +127,7 @@ const state = {
     message: ''
   },
   developerToolsEnabled: false,
+  avatarStageStarted: false,
   selectedSavedSessionId: '',
   transcript: [],
   latencySamples: [],
@@ -146,6 +147,7 @@ const avatarStage = createAvatarStage({
     stageAdviceOverlay: els.stageAdviceOverlay
   },
   onAdvice: addAdvice,
+  onDiagnosticEvent: logEvent,
   onLoadingChange: setAvatarLoading,
   onVRSessionRequested: ensureRealtimeForVR,
   onVRSessionStart: ensureRealtimeForVR
@@ -159,7 +161,7 @@ const realtimeEngine = createRealtimeConversationEngine({
 const conversationLog = createConversationLogClient({
   canPersist: () => canWriteLogs(state.authUser, state.publicAccess),
   getTranscript: () => state.transcript,
-  summarizeTitle: compactStageText,
+  summarizeTitle: defaultTitleSummary,
   onError: (event) => logEvent(event)
 });
 
@@ -323,6 +325,7 @@ function renderAuthState() {
     setHidden(document.getElementById(`${name}Tab`), publicClosed);
   }
   if (publicClosed) activateTab('logs');
+  if (state.authUser && interactiveAllowed) initScene();
   if (state.authUser) scheduleStageResize();
   if (els.btnConnect) els.btnConnect.disabled = !state.authUser || !interactiveAllowed || state.realtimeStarting || state.connectionLoading || Boolean(state.pc || state.dataChannel);
   if (els.btnSendText) els.btnSendText.disabled = !state.authUser || !interactiveAllowed;
@@ -504,7 +507,11 @@ function wireEvents() {
 }
 
 function initScene() {
+  if (state.avatarStageStarted) return;
+  if (!state.authUser || !canUseInteractiveFeatures(state.authUser, state.publicAccess)) return;
+  state.avatarStageStarted = true;
   avatarStage.init().catch((error) => {
+    state.avatarStageStarted = false;
     console.error(error);
     addAdvice('app', `アバター初期化に失敗しました: ${error.message || error}`, 'risk');
   });

@@ -8,6 +8,9 @@
     { "route": "/login", "rewrite": "/index.html", "allowedRoles": ["anonymous", "authenticated"] },
     { "route": "/logout", "redirect": "/api/auth/logout", "statusCode": 302 },
     { "route": "/api/*", "allowedRoles": ["anonymous", "authenticated"] },
+    { "route": "/assets/*.vrm", "allowedRoles": ["anonymous", "authenticated"], "headers": { "Cache-Control": "public, max-age=31536000, immutable" } },
+    { "route": "/assets/*.vrma", "allowedRoles": ["anonymous", "authenticated"], "headers": { "Cache-Control": "public, max-age=31536000, immutable" } },
+    { "route": "/assets/*.glb", "allowedRoles": ["anonymous", "authenticated"], "headers": { "Cache-Control": "public, max-age=31536000, immutable" } },
     { "route": "/assets/*", "allowedRoles": ["anonymous", "authenticated"] },
     { "route": "/*.css", "allowedRoles": ["anonymous", "authenticated"] },
     { "route": "/*.js", "allowedRoles": ["anonymous", "authenticated"] },
@@ -21,6 +24,7 @@
   },
   "mimeTypes": {
     ".vrm": "model/gltf-binary",
-    ".vrma": "model/gltf-binary"
+    ".vrma": "model/gltf-binary",
+    ".glb": "model/gltf-binary"
   }
 }

@@ -5,10 +5,12 @@
   "description": "Static frontend for ZatsuCoach MVP",
   "scripts": {
     "build": "node scripts/build-static.js",
+    "optimize:avatar": "node scripts/optimize-vrm-textures.mjs",
     "test": "node --test",
     "smoke:conversation": "node scripts/realtime-conversation-smoke.js"
   },
   "devDependencies": {
-    "playwright-core": "^1.60.0"
+    "playwright-core": "^1.60.0",
+    "sharp": "^0.34.5"
   }
 }

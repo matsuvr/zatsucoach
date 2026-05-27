@@ -290,19 +290,20 @@ button.busy::before {
 }
 .stageAdviceOverlay {
   justify-self: center;
-  width: min(74%, 560px);
-  min-height: 2.95rem;
+  width: min(92%, 880px);
+  min-height: 4.2rem;
   display: flex;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
   border-radius: 0.82rem;
-  padding: 0.68rem 1.15rem;
+  padding: 0.9rem 1.35rem;
   background: rgba(250, 250, 246, 0.96);
   color: #161a22;
-  font-size: clamp(0.95rem, 2.3vw, 1.22rem);
+  font-size: 1.05rem;
   line-height: 1.35;
-  text-align: center;
+  text-align: left;
   overflow-wrap: anywhere;
+  white-space: pre-wrap;
   box-shadow: 0 0.8rem 2.2rem rgba(0, 0, 0, 0.28);
 }
 .statusbar {
@@ -431,7 +432,7 @@ code { color: #a5d6ff; }
   .stage { min-height: 58vh; }
   .stageOverlay { padding: 0.75rem 0.8rem 1rem; }
   .stageTranscriptBubble { max-width: min(86%, 520px); }
-  .stageAdviceOverlay { width: min(88%, 520px); }
+  .stageAdviceOverlay { width: min(94%, 700px); font-size: 0.98rem; }
   .coachPanel { min-height: 70vh; }
   .topbar { align-items: flex-start; flex-direction: column; }
   .logsLayout { grid-template-columns: 1fr; }

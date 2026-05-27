@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   calculateStageBubbleMaxWidth,
-  compactStageText,
+  calculateVRPanelDepth,
   fitCanvasText,
   normalizeStageText,
   wrapCanvasText
@@ -21,14 +21,28 @@ test('stage text normalizes reason labels and whitespace', () => {
   );
 });
 
-test('stage text compacts with ellipsis', () => {
-  assert.equal(compactStageText('1234567890', 6), '12345…');
+test('VR panel depth moves older panels farther from the user', () => {
+  assert.deepEqual(
+    [0, 1, 2].map((index) => calculateVRPanelDepth(-1.35, index, 3)),
+    [-1.374, -1.362, -1.35]
+  );
+});
+
+test('VR panel depth clamps invalid indexes and counts', () => {
+  assert.equal(calculateVRPanelDepth(0.06, -1, 3), 0.036);
+  assert.equal(calculateVRPanelDepth(0.06, 99, 3), 0.06);
+  assert.equal(calculateVRPanelDepth(0.06, 0, 0), 0.06);
 });
 
 test('canvas text wrapper truncates long text by measured width', () => {
   const ctx = { measureText: (value) => ({ width: Array.from(value).length * 10 }) };
   assert.deepEqual(wrapCanvasText(ctx, 'abcdefghij', 30, 2, true), ['abc', 'de…']);
   assert.deepEqual(wrapCanvasText(ctx, 'abcdef', 30, 3, false), ['abc', 'def']);
+});
+
+test('canvas text wrapper keeps full text when truncation is disabled', () => {
+  const ctx = { measureText: (value) => ({ width: Array.from(value).length * 10 }) };
+  assert.deepEqual(wrapCanvasText(ctx, 'abcdefghij', 30, 2, false), ['abc', 'def', 'ghi', 'j']);
 });
 
 test('canvas text wrapper keeps ellipsis inside measured width', () => {

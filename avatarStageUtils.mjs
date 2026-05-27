@@ -1,9 +1,9 @@
 export const STAGE_TRANSCRIPT_LIMIT = 4;
-export const STAGE_ADVICE_TEXT_LIMIT = 96;
 export const STAGE_BUBBLE_DEFAULT_MAX_PX = 520;
 export const STAGE_BUBBLE_MIN_PX = 72;
 export const STAGE_BUBBLE_AVATAR_GAP_PX = 22;
 export const STAGE_BUBBLE_EDGE_INSET_PX = 26;
+export const VR_PANEL_DEPTH_STEP = 0.012;
 
 export function calculateStageBubbleMaxWidth(availableWidth) {
   return Math.max(
@@ -20,10 +20,15 @@ export function normalizeStageText(text) {
     .trim();
 }
 
-export function compactStageText(text, limit) {
-  const normalized = normalizeStageText(text);
-  if (normalized.length <= limit) return normalized;
-  return `${normalized.slice(0, Math.max(0, limit - 1)).trim()}…`;
+export function calculateVRPanelDepth(baseZ, panelIndex, panelCount, step = VR_PANEL_DEPTH_STEP) {
+  const safeBaseZ = Number.isFinite(baseZ) ? baseZ : 0;
+  const safeStep = Number.isFinite(step) && step > 0 ? step : VR_PANEL_DEPTH_STEP;
+  const safeCount = Math.max(1, Math.floor(Number(panelCount) || 1));
+  const safeIndex = Math.min(
+    safeCount - 1,
+    Math.max(0, Math.floor(Number(panelIndex) || 0))
+  );
+  return safeBaseZ - (safeCount - 1 - safeIndex) * safeStep;
 }
 
 export function wrapCanvasText(ctx, text, maxWidth, maxLines, truncate = true) {
@@ -40,7 +45,7 @@ export function fitCanvasText(ctx, text, {
   const minSize = Math.max(1, Math.min(fontSize, minFontSize));
   for (let size = fontSize; size >= minSize; size -= 2) {
     setCanvasTextFont(ctx, size);
-    const layout = layoutCanvasText(ctx, text, maxWidth, maxLines, false);
+    const layout = layoutCanvasText(ctx, text, maxWidth, maxLines, truncate);
     if (!layout.truncated && layout.lines.every((line) => ctx.measureText(line).width <= maxWidth)) {
       return { fontSize: size, lines: layout.lines };
     }
@@ -60,7 +65,7 @@ export function layoutCanvasText(ctx, text, maxWidth, maxLines, truncate = true)
     .replace(/\n{3,}/g, '\n\n')
     .trim();
   if (!source) return { lines: [''], truncated: false };
-  const lineLimit = Number.isFinite(maxLines) ? Math.max(1, maxLines) : Infinity;
+  const lineLimit = truncate && Number.isFinite(maxLines) ? Math.max(1, maxLines) : Infinity;
   const paragraphs = source.split('\n');
   const lines = [];
   let truncated = false;
