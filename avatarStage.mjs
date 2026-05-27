@@ -3,6 +3,7 @@ import {
   STAGE_BUBBLE_EDGE_INSET_PX,
   STAGE_TRANSCRIPT_LIMIT,
   calculateStageBubbleMaxWidth,
+  calculateVROriginFromBounds,
   calculateVRPanelDepth,
   calculateVRTextCanvasMetrics,
   drawBubbleShape,
@@ -15,6 +16,7 @@ import {
 
 export {
   calculateStageBubbleMaxWidth,
+  calculateVROriginFromBounds,
   calculateVRPanelDepth,
   calculateVRTextCanvasMetrics,
   drawBubbleShape,
@@ -26,13 +28,17 @@ export {
 
 const AVATAR_VRM_URL = './assets/8590256991748008892.lite-2048-1024.vrm';
 const AVATAR_VRMA_URL = './assets/relaxed_stand_idle_1s_skeleton_only_human_breath.vrma';
-const OFFICE_BACKGROUND_URL = './assets/minimal_office_background_v2.glb';
+const OFFICE_BACKGROUND_URL = './assets/minimal_office_background_v2_fixed_unlit.glb';
 const STAGE_CAMERA_FOV = 30;
 const STAGE_CAMERA_POSITION = Object.freeze({ x: 0, y: 1.35, z: 3.1 });
 const STAGE_CAMERA_TARGET = Object.freeze({ x: 0, y: 1.25, z: 0 });
 const AVATAR_STAGE_POSITION = Object.freeze({ x: 0, y: 0, z: 0 });
 const OFFICE_BACKGROUND_POSITION = Object.freeze({ x: 0, y: 0, z: -0.55 });
 const OFFICE_BACKGROUND_SCALE = 1;
+const FORCE_OFFICE_BACKGROUND_BASIC_MATERIAL = false;
+const VR_FLOOR_EDGE_MARGIN = 0.55;
+const VR_DEFAULT_ORIGIN_X = 0;
+const VR_DEFAULT_ORIGIN_Z = 3.1;
 const VR_AVATAR_BUBBLE_DEFAULT_WIDTH = 0.82;
 const VR_AVATAR_BUBBLE_MIN_WIDTH = 0.34;
 const VR_AVATAR_BUBBLE_DEFAULT_X = -0.82;
@@ -68,6 +74,7 @@ export function createAvatarStage({
     frontKeyLight: null,
     fallbackFloor: null,
     officeBackground: null,
+    officeFloorWorldBox: null,
     vrConversationGroup: null,
     vrHudGroup: null,
     vrConversationMeshes: [],
@@ -218,7 +225,8 @@ export function createAvatarStage({
     onVRSessionStart();
     if (state.controls) state.controls.enabled = false;
     if (!state.cameraRig) return;
-    state.cameraRig.position.set(STAGE_CAMERA_POSITION.x, 0, STAGE_CAMERA_POSITION.z);
+    const vrOrigin = calculateVROriginPosition();
+    state.cameraRig.position.copy(vrOrigin);
     state.cameraRig.rotation.set(0, 0, 0);
     state.cameraRig.scale.set(1, 1, 1);
     state.cameraRig.updateMatrixWorld(true);
@@ -251,6 +259,7 @@ export function createAvatarStage({
 
   function resizeStageRenderer() {
     if (!state.renderer || !state.camera || !els.stage) return;
+    if (state.renderer.xr?.isPresenting) return;
     const rect = els.stage.getBoundingClientRect();
     const width = Math.floor(rect.width);
     const height = Math.floor(rect.height);
@@ -399,6 +408,8 @@ export function createAvatarStage({
       );
       tuneOfficeBackground(background);
       alignOfficeBackgroundFloor(background);
+      state.officeFloorWorldBox = getOfficeFloorWorldBox(background);
+      logOfficeBackgroundBounds(background);
       state.scene.add(background);
       state.officeBackground = background;
       if (fallbackFloor) fallbackFloor.visible = false;
@@ -417,18 +428,110 @@ export function createAvatarStage({
     background.updateMatrixWorld(true);
   }
 
+  function getOfficeFloorWorldBox(background) {
+    const floor = background?.getObjectByName?.('floor');
+    if (!floor) return null;
+
+    background.updateMatrixWorld(true);
+    floor.updateMatrixWorld(true);
+
+    const box = new THREE.Box3().setFromObject(floor);
+
+    if (
+      !Number.isFinite(box.min.x) ||
+      !Number.isFinite(box.min.y) ||
+      !Number.isFinite(box.min.z) ||
+      !Number.isFinite(box.max.x) ||
+      !Number.isFinite(box.max.y) ||
+      !Number.isFinite(box.max.z) ||
+      box.isEmpty()
+    ) {
+      return null;
+    }
+
+    return box;
+  }
+
+  function logOfficeBackgroundBounds(background) {
+    if (!background) return;
+
+    const roomBox = new THREE.Box3().setFromObject(background);
+    const floor = background.getObjectByName('floor');
+    const floorBox = floor ? new THREE.Box3().setFromObject(floor) : null;
+
+    console.info('[office background] room bounds', {
+      min: roomBox.min.toArray(),
+      max: roomBox.max.toArray()
+    });
+
+    if (floorBox) {
+      console.info('[office background] floor bounds', {
+        min: floorBox.min.toArray(),
+        max: floorBox.max.toArray()
+      });
+    }
+  }
+
+  function calculateVROriginPosition() {
+    const floorBox = state.officeFloorWorldBox;
+
+    if (!floorBox || floorBox.isEmpty()) {
+      return new THREE.Vector3(
+        VR_DEFAULT_ORIGIN_X,
+        0,
+        VR_DEFAULT_ORIGIN_Z
+      );
+    }
+
+    const origin = calculateVROriginFromBounds({
+      minX: floorBox.min.x,
+      maxX: floorBox.max.x,
+      minZ: floorBox.min.z,
+      maxZ: floorBox.max.z,
+      preferredX: VR_DEFAULT_ORIGIN_X,
+      preferredZ: VR_DEFAULT_ORIGIN_Z,
+      margin: VR_FLOOR_EDGE_MARGIN
+    });
+
+    return new THREE.Vector3(origin.x, origin.y, origin.z);
+  }
+
   function tuneOfficeBackground(root) {
     root.traverse((object) => {
       if (!object.isMesh) return;
       object.frustumCulled = false;
-      const materials = Array.isArray(object.material) ? object.material : [object.material];
-      for (const material of materials) {
-        if (!material) continue;
-        if ('roughness' in material) material.roughness = Math.max(material.roughness ?? 0.75, 0.82);
-        if ('metalness' in material) material.metalness = 0;
-        material.needsUpdate = true;
+      object.castShadow = false;
+      object.receiveShadow = false;
+      if (FORCE_OFFICE_BACKGROUND_BASIC_MATERIAL) {
+        convertOfficeMeshToBasicMaterial(object);
       }
     });
+  }
+
+  function convertOfficeMeshToBasicMaterial(object) {
+    const sourceMaterials = Array.isArray(object.material)
+      ? object.material
+      : [object.material];
+    const converted = sourceMaterials.map((sourceMaterial) => {
+      const hasVertexColors = Boolean(object.geometry?.attributes?.color);
+      const color = sourceMaterial?.color
+        ? sourceMaterial.color.clone()
+        : new THREE.Color(0xffffff);
+
+      return new THREE.MeshBasicMaterial({
+        name: sourceMaterial?.name
+          ? `${sourceMaterial.name}_basicFallback`
+          : `${object.name || 'office'}_basicFallback`,
+        color,
+        vertexColors: hasVertexColors,
+        side: THREE.DoubleSide,
+        toneMapped: false,
+        depthTest: true,
+        depthWrite: true
+      });
+    });
+
+    object.material = Array.isArray(object.material) ? converted : converted[0];
   }
 
   async function loadVRM(url) {
@@ -861,9 +964,21 @@ export function createAvatarStage({
     }
   }
 
+  function syncXRCameraBeforeSceneSync() {
+    if (!state.renderer?.xr?.isPresenting || !state.camera) return;
+    if (typeof state.renderer.xr.updateCamera !== 'function') return;
+
+    state.camera.parent?.updateMatrixWorld(true);
+    state.renderer.xr.updateCamera(state.camera);
+  }
+
   function renderLoop() {
     const delta = state.clock.getDelta();
-    state.controls?.update();
+    const isPresenting = Boolean(state.renderer?.xr?.isPresenting);
+    if (!isPresenting) {
+      state.controls?.update();
+    }
+    syncXRCameraBeforeSceneSync();
     syncCameraLighting();
     syncVRTextPanels();
     state.animationMixer?.update(delta);

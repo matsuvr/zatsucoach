@@ -92,6 +92,39 @@ export function calculateVRPanelDepth(baseZ, panelIndex, panelCount, step = VR_P
   return safeBaseZ - (safeCount - 1 - safeIndex) * safeStep;
 }
 
+export function calculateVROriginFromBounds({
+  minX,
+  maxX,
+  minZ,
+  maxZ,
+  preferredX = 0,
+  preferredZ = 3.1,
+  margin = 0.55
+} = {}) {
+  if (![minX, maxX, minZ, maxZ].every(Number.isFinite)) {
+    return { x: preferredX, y: 0, z: preferredZ };
+  }
+
+  const safeMinX = minX + margin;
+  const safeMaxX = maxX - margin;
+  const safeMinZ = minZ + margin;
+  const safeMaxZ = maxZ - margin;
+
+  const x = safeMaxX >= safeMinX
+    ? Math.min(safeMaxX, Math.max(safeMinX, preferredX))
+    : preferredX;
+
+  const z = safeMaxZ >= safeMinZ
+    ? Math.min(safeMaxZ, Math.max(safeMinZ, preferredZ))
+    : preferredZ;
+
+  return { x: roundVROriginCoordinate(x), y: 0, z: roundVROriginCoordinate(z) };
+}
+
+function roundVROriginCoordinate(value) {
+  return Math.round(value * 1e12) / 1e12;
+}
+
 export function wrapCanvasText(ctx, text, maxWidth, maxLines, truncate = true) {
   return layoutCanvasText(ctx, text, maxWidth, maxLines, truncate).lines;
 }

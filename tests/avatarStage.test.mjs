@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   calculateStageBubbleMaxWidth,
+  calculateVROriginFromBounds,
   calculateVRPanelDepth,
   calculateVRTextCanvasMetrics,
   fitCanvasText,
@@ -34,6 +35,52 @@ test('VR panel depth clamps invalid indexes and counts', () => {
   assert.equal(calculateVRPanelDepth(0.06, -1, 3), 0.036);
   assert.equal(calculateVRPanelDepth(0.06, 99, 3), 0.06);
   assert.equal(calculateVRPanelDepth(0.06, 0, 0), 0.06);
+});
+
+test('VR origin remains inside fixed unlit office floor bounds', () => {
+  const origin = calculateVROriginFromBounds({
+    minX: -4,
+    maxX: 4,
+    minZ: -3.55,
+    maxZ: 5.45,
+    preferredX: 0,
+    preferredZ: 3.1,
+    margin: 0.55
+  });
+
+  assert.equal(origin.x, 0);
+  assert.equal(origin.y, 0);
+  assert.equal(origin.z, 3.1);
+});
+
+test('VR origin is clamped when old office floor bounds are too short', () => {
+  const origin = calculateVROriginFromBounds({
+    minX: -4,
+    maxX: 4,
+    minZ: -3.55,
+    maxZ: 2.45,
+    preferredX: 0,
+    preferredZ: 3.1,
+    margin: 0.55
+  });
+
+  assert.equal(origin.x, 0);
+  assert.equal(origin.y, 0);
+  assert.equal(origin.z, 1.9);
+});
+
+test('VR origin falls back when office floor bounds are invalid', () => {
+  const origin = calculateVROriginFromBounds({
+    minX: NaN,
+    maxX: 4,
+    minZ: -3.55,
+    maxZ: 5.45,
+    preferredX: 0,
+    preferredZ: 3.1,
+    margin: 0.55
+  });
+
+  assert.deepEqual(origin, { x: 0, y: 0, z: 3.1 });
 });
 
 test('Quest renderer profile keeps VR quality settings enabled', () => {
