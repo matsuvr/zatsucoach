@@ -86,13 +86,53 @@ export function hasUsefulTranscript(text) {
 }
 
 export function assistantIncompleteReason(meta) {
-  const status = String(meta?.status || '').toLowerCase();
-  const details = meta?.statusDetails || {};
-  const reason = String(details.reason || details.type || details.code || '').toLowerCase();
-  if (status === 'incomplete' || status === 'cancelled' || status === 'failed') return reason || status;
+  const diagnostic = assistantIncompleteDiagnostic(meta);
+  const { status, reason, type, code } = diagnostic;
+  if (status === 'incomplete' || status === 'cancelled' || status === 'failed') return reason || code || type || status;
   if (reason.includes('max') && reason.includes('token')) return reason;
   if (reason.includes('interrupt') || reason.includes('turn_detected')) return reason;
   return '';
+}
+
+export function assistantIncompleteDiagnostic(meta) {
+  const details = meta?.statusDetails && typeof meta.statusDetails === 'object' ? meta.statusDetails : {};
+  const error = details.error && typeof details.error === 'object' ? details.error : {};
+  return {
+    status: String(meta?.status || '').toLowerCase(),
+    type: String(details.type || '').toLowerCase(),
+    reason: String(details.reason || '').toLowerCase(),
+    code: String(error.code || details.code || '').toLowerCase(),
+    message: cleanDiagnosticMessage(error.message || details.message || ''),
+    usage: summarizeUsage(meta?.usage)
+  };
+}
+
+export function formatAssistantIncompleteDiagnostic(meta) {
+  const diagnostic = assistantIncompleteDiagnostic(meta);
+  const parts = [];
+  if (diagnostic.status) parts.push(`status=${diagnostic.status}`);
+  if (diagnostic.type) parts.push(`type=${diagnostic.type}`);
+  if (diagnostic.reason) parts.push(`reason=${diagnostic.reason}`);
+  if (diagnostic.code) parts.push(`code=${diagnostic.code}`);
+  if (diagnostic.message) parts.push(`message=${diagnostic.message}`);
+  if (diagnostic.usage?.total_tokens !== null && diagnostic.usage?.total_tokens !== undefined) {
+    parts.push(`tokens=${diagnostic.usage.total_tokens}/${diagnostic.usage.input_tokens ?? '?'}/${diagnostic.usage.output_tokens ?? '?'}`);
+  }
+  return parts.join(', ');
+}
+
+export function formatAssistantIncompleteMessage(meta) {
+  const reason = assistantIncompleteReason(meta);
+  if (!reason) return '';
+  const detail = formatAssistantIncompleteDiagnostic(meta);
+  return detail ? `${reason} (${detail})` : reason;
+}
+
+function cleanDiagnosticMessage(value) {
+  return String(value || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 180);
 }
 
 export function summarizeStatusDetails(details) {

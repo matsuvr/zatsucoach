@@ -14,6 +14,7 @@ const files = [
   'avatarStageUtils.mjs',
   'coachAdviceClient.mjs',
   'conversationLogClient.mjs',
+  'diagnosticEventClient.mjs',
   'realtimeConversationEngine.mjs',
   'realtimeConversationUtils.mjs',
   'staticwebapp.config.json'

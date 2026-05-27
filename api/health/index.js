@@ -34,6 +34,7 @@ module.exports = async function (context, req) {
       logStoreReady: hasLogStorageConfig(),
       logSessionsTable: process.env.ZATSUCOACH_LOG_SESSIONS_TABLE || 'ZatsucoachSessions',
       logItemsTable: process.env.ZATSUCOACH_LOG_ITEMS_TABLE || 'ZatsucoachItems',
+      diagnosticEventsTable: process.env.ZATSUCOACH_DIAGNOSTIC_EVENTS_TABLE || 'ZatsucoachDiagnostics',
       transcribeDiagnosticEnabled: String(process.env.ENABLE_TRANSCRIBE_DIAGNOSTIC || '').toLowerCase() === 'true',
       codeVersion: '2026-05-25-email-password-auth',
       node: process.version

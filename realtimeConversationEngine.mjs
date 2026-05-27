@@ -7,6 +7,8 @@ import {
   REALTIME_RESPONSE_CREATE_TIMEOUT_MS,
   REALTIME_RESPONSE_TIMEOUT_MS,
   TIMELINE_INTERVAL_KEEP_ITEMS,
+  assistantIncompleteDiagnostic,
+  formatAssistantIncompleteMessage,
   USER_TURN_TRANSCRIPT_WAIT_MS,
   assistantIncompleteReason,
   assistantResponseTimeline,
@@ -26,7 +28,9 @@ import {
 } from './realtimeConversationUtils.mjs';
 
 export {
+  assistantIncompleteDiagnostic,
   assistantIncompleteReason,
+  formatAssistantIncompleteMessage,
   estimateSpeechDurationMs,
   hasUsefulTranscript,
   userTurnDecision
@@ -985,6 +989,7 @@ export function createRealtimeConversationEngine({
     if (!parts?.size) {
       const incompleteReason = assistantIncompleteReason(meta);
       if (incompleteReason) {
+        const incompleteMessage = formatAssistantIncompleteMessage(meta);
         clearTimer(state.assistantResponseTimers.get(responseId));
         state.assistantResponseTimers.delete(responseId);
         state.assistantResponseMeta.delete(responseId);
@@ -999,16 +1004,17 @@ export function createRealtimeConversationEngine({
             statusDetails: summarizeStatusDetails(meta.statusDetails),
             usage: summarizeUsage(meta.usage),
             incompleteReason,
+            incompleteDiagnostic: assistantIncompleteDiagnostic(meta),
             parts: 0,
             textChars: 0,
             userItemId: meta.userItemId || null,
             userPerfAt: Number(meta.userPerfAt) || null
           }
         });
-        effect('addMetric', { text: `Realtime incomplete response: ${incompleteReason}` });
+        effect('addMetric', { text: `Realtime incomplete response: ${incompleteMessage || incompleteReason}` });
         effect('addAdvice', {
           source: 'app',
-          text: `Realtime応答が途中終了しました: ${incompleteReason}`,
+          text: `Realtime応答が途中終了しました: ${incompleteMessage || incompleteReason}`,
           label: 'warn'
         });
       }
@@ -1031,6 +1037,7 @@ export function createRealtimeConversationEngine({
 
     if (!text) return;
     const incompleteReason = assistantIncompleteReason(meta);
+    const incompleteMessage = formatAssistantIncompleteMessage(meta);
     if (!incompleteReason) {
       effect('addTranscript', {
         role: 'assistant',
@@ -1053,6 +1060,7 @@ export function createRealtimeConversationEngine({
         statusDetails: summarizeStatusDetails(meta.statusDetails),
         usage: summarizeUsage(meta.usage),
         incompleteReason,
+        incompleteDiagnostic: assistantIncompleteDiagnostic(meta),
         parts: parts.size,
         textChars: text.length,
         userItemId: meta.userItemId || null,
@@ -1060,10 +1068,10 @@ export function createRealtimeConversationEngine({
       }
     });
     if (incompleteReason) {
-      effect('addMetric', { text: `Realtime incomplete response: ${incompleteReason}` });
+      effect('addMetric', { text: `Realtime incomplete response: ${incompleteMessage || incompleteReason}` });
       effect('addAdvice', {
         source: 'app',
-        text: `Realtime応答が途中終了しました: ${incompleteReason}`,
+        text: `Realtime応答が途中終了しました: ${incompleteMessage || incompleteReason}`,
         label: 'warn'
       });
       return;

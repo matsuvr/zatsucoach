@@ -30,6 +30,7 @@ import {
 } from './appUtils.mjs';
 import { createCoachAdviceClient } from './coachAdviceClient.mjs';
 import { createConversationLogClient, defaultTitleSummary } from './conversationLogClient.mjs';
+import { createDiagnosticEventClient } from './diagnosticEventClient.mjs';
 import { createRealtimeConversationEngine } from './realtimeConversationEngine.mjs';
 
 const defaultSettings = Object.freeze({
@@ -163,6 +164,20 @@ const conversationLog = createConversationLogClient({
   getTranscript: () => state.transcript,
   summarizeTitle: defaultTitleSummary,
   onError: (event) => logEvent(event)
+});
+
+const diagnosticEvents = createDiagnosticEventClient({
+  canPersist: () => canWriteLogs(state.authUser, state.publicAccess),
+  getContext: () => ({
+    sessionId: state.activeRealtimeSessionId,
+    logSessionId: conversationLog.snapshot().sessionId,
+    deployment: state.settings.realtimeDeployment,
+    voice: state.settings.voice,
+    connectionState: state.pc?.connectionState || '',
+    iceConnectionState: state.pc?.iceConnectionState || '',
+    dataChannelState: state.dataChannel?.readyState || ''
+  }),
+  onError: (event) => console.warn(event.error || event)
 });
 
 const coachAdvice = createCoachAdviceClient({
@@ -502,6 +517,7 @@ function wireEvents() {
   els.btnExportEvents.addEventListener('click', exportDiagnosticEvents);
   window.addEventListener('beforeunload', () => {
     flushLogItems();
+    flushDiagnosticEvents();
     stopRealtime(false);
   });
 }
@@ -1017,7 +1033,12 @@ async function flushLogItems() {
   await conversationLog.flush();
 }
 
+async function flushDiagnosticEvents() {
+  await diagnosticEvents.flush();
+}
+
 async function closeCurrentLogSession(reason = 'closed') {
+  await flushDiagnosticEvents();
   await conversationLog.close(reason);
   if (canPersistLogs()) {
     loadSavedSessions();
@@ -1026,6 +1047,7 @@ async function closeCurrentLogSession(reason = 'closed') {
 
 function resetCurrentLogSession() {
   conversationLog.reset();
+  diagnosticEvents.reset();
 }
 
 async function loadSavedSessions() {
@@ -1157,6 +1179,10 @@ function addMetric(text) {
 }
 
 function logEvent(event) {
+  diagnosticEvents.queue({
+    ...event,
+    perfAt: Math.round(performance.now())
+  });
   if (!canUseDeveloperTools(state.developerToolsEnabled)) return;
   const compact = compactEvent(event);
   state.diagnosticEvents.push({

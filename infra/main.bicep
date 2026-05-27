@@ -71,6 +71,7 @@ var staticWebAppName = 'stapp-zatsucoach-${resourceToken}'
 var storageAccountName = 'stzatsu${take(resourceToken, 17)}'
 var sessionsTableName = 'ZatsucoachSessions'
 var itemsTableName = 'ZatsucoachItems'
+var diagnosticsTableName = 'ZatsucoachDiagnostics'
 var tags = {
   'azd-env-name': environmentName
   app: 'zatsucoach-mvp'
@@ -109,6 +110,11 @@ resource sessionsTable 'Microsoft.Storage/storageAccounts/tableServices/tables@2
 resource itemsTable 'Microsoft.Storage/storageAccounts/tableServices/tables@2023-05-01' = {
   parent: tableService
   name: itemsTableName
+}
+
+resource diagnosticsTable 'Microsoft.Storage/storageAccounts/tableServices/tables@2023-05-01' = {
+  parent: tableService
+  name: diagnosticsTableName
 }
 
 resource staticWebApp 'Microsoft.Web/staticSites@2022-09-01' = {
@@ -151,6 +157,7 @@ resource staticWebAppSettings 'Microsoft.Web/staticSites/config@2022-09-01' = {
     ZATSUCOACH_LOG_STORAGE_CONNECTION_STRING: storageConnectionString
     ZATSUCOACH_LOG_SESSIONS_TABLE: sessionsTable.name
     ZATSUCOACH_LOG_ITEMS_TABLE: itemsTable.name
+    ZATSUCOACH_DIAGNOSTIC_EVENTS_TABLE: diagnosticsTable.name
     ZATSUCOACH_AUTH_SECRET: zatsucoachAuthSecret
     ZATSUCOACH_DEMO_EMAIL: zatsucoachDemoEmail
     ZATSUCOACH_DEMO_PASSWORD_HASH: zatsucoachDemoPasswordHash

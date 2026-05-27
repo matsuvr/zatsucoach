@@ -9,13 +9,17 @@ const {
 
 const DEFAULT_SESSIONS_TABLE = 'ZatsucoachSessions';
 const DEFAULT_ITEMS_TABLE = 'ZatsucoachItems';
+const DEFAULT_DIAGNOSTICS_TABLE = 'ZatsucoachDiagnostics';
 const MAX_TITLE_CHARS = 120;
 const MAX_TEXT_CHARS = 4000;
 const MAX_META_CHARS = 8000;
 const MAX_BATCH_ITEMS = 50;
+const MAX_DIAGNOSTIC_EVENTS = 50;
+const MAX_DIAGNOSTIC_JSON_CHARS = 12000;
 
 let sessionsClientPromise = null;
 let itemsClientPromise = null;
+let diagnosticsClientPromise = null;
 
 function storageConnectionString() {
   return process.env.ZATSUCOACH_LOG_STORAGE_CONNECTION_STRING ||
@@ -29,6 +33,10 @@ function sessionsTableName() {
 
 function itemsTableName() {
   return safeTableName(process.env.ZATSUCOACH_LOG_ITEMS_TABLE || DEFAULT_ITEMS_TABLE);
+}
+
+function diagnosticsTableName() {
+  return safeTableName(process.env.ZATSUCOACH_DIAGNOSTIC_EVENTS_TABLE || DEFAULT_DIAGNOSTICS_TABLE);
 }
 
 function safeTableName(value) {
@@ -68,6 +76,13 @@ function itemsClient() {
     itemsClientPromise = ensureTable(tableClient(itemsTableName()));
   }
   return itemsClientPromise;
+}
+
+function diagnosticsClient() {
+  if (!diagnosticsClientPromise) {
+    diagnosticsClientPromise = ensureTable(tableClient(diagnosticsTableName()));
+  }
+  return diagnosticsClientPromise;
 }
 
 function hasLogStorageConfig() {
@@ -164,6 +179,126 @@ function normalizeItems(body) {
   return items;
 }
 
+function normalizeDiagnosticEvents(user, body = {}) {
+  const events = Array.isArray(body.events) ? body.events : [];
+  if (events.length > MAX_DIAGNOSTIC_EVENTS) throw new HttpError(400, `events length must be <= ${MAX_DIAGNOSTIC_EVENTS}`);
+  return events
+    .map((event, index) => normalizeDiagnosticEvent(user, event, index))
+    .filter(Boolean);
+}
+
+function normalizeDiagnosticEvent(user, event = {}, index = 0) {
+  const type = cleanText(event.type || '', 120);
+  if (!isDiagnosticEventType(type)) return null;
+
+  const at = cleanText(event.at || new Date().toISOString(), 40);
+  const dateKey = at.slice(0, 10).replace(/-/g, '') || new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  const sessionId = cleanText(event.sessionId || '', 80);
+  const responseId = cleanText(event.responseId || '', 120);
+  const itemId = cleanText(event.itemId || '', 120);
+  const details = safeDiagnosticDetails(event.details);
+  return {
+    partitionKey: `${user.safeUserId}_${dateKey}`,
+    rowKey: safeRowKey(`${at}_${String(index).padStart(3, '0')}_${crypto.randomUUID()}`),
+    at,
+    type,
+    sessionId,
+    logSessionId: cleanText(event.logSessionId || '', 80),
+    deployment: cleanText(event.deployment || '', 120),
+    voice: cleanText(event.voice || '', 40),
+    connectionState: cleanText(event.connectionState || '', 40),
+    iceConnectionState: cleanText(event.iceConnectionState || '', 40),
+    dataChannelState: cleanText(event.dataChannelState || '', 40),
+    eventId: cleanText(event.eventId || '', 120),
+    responseId,
+    itemId,
+    status: cleanText(event.status || '', 40),
+    reason: cleanText(event.reason || '', 120),
+    errorCode: cleanText(event.errorCode || '', 120),
+    errorMessage: cleanText(event.errorMessage || '', 240),
+    perfAt: safeCount(event.perfAt),
+    detailsJson: cleanText(JSON.stringify(details), MAX_DIAGNOSTIC_JSON_CHARS)
+  };
+}
+
+function safeDiagnosticDetails(value) {
+  return stripDiagnosticSecrets(value, 0);
+}
+
+function stripDiagnosticSecrets(value, depth) {
+  if (depth > 5) return null;
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'string') return cleanText(value, 500);
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (typeof value === 'boolean') return value;
+  if (Array.isArray(value)) return value.slice(0, 20).map((item) => stripDiagnosticSecrets(item, depth + 1));
+  if (typeof value !== 'object') return null;
+
+  const blocked = new Set([
+    'authorization',
+    'apikey',
+    'api-key',
+    'client_secret',
+    'data',
+    'delta',
+    'instructions',
+    'messages',
+    'sdp',
+    'text',
+    'token',
+    'transcript'
+  ]);
+  const next = {};
+  for (const [key, item] of Object.entries(value)) {
+    const safeKey = cleanText(key, 80);
+    if (!safeKey || blocked.has(safeKey.toLowerCase())) continue;
+    const safeValue = stripDiagnosticSecrets(item, depth + 1);
+    if (safeValue === null || safeValue === undefined || safeValue === '') continue;
+    next[safeKey] = safeValue;
+  }
+  return next;
+}
+
+function isDiagnosticEventType(type) {
+  return [
+    'response.created',
+    'response.done',
+    'error',
+    'session.error',
+    'output_audio_buffer.started',
+    'output_audio_buffer.stopped',
+    'input_audio_buffer.speech_started',
+    'input_audio_buffer.speech_stopped',
+    'conversation.item.input_audio_transcription.failed',
+    'conversation.item.audio_transcription.failed',
+    'client.assistant_response_flushed',
+    'client.connection_state',
+    'client.data_channel_open',
+    'client.data_channel_close',
+    'client.data_channel_error',
+    'client.ice_state',
+    'client.manual_response_create_deferred',
+    'client.manual_response_create_sent',
+    'client.microphone_tracks_set',
+    'client.noise_turn_ignored',
+    'client.output_audio_stop_watchdog_released',
+    'client.realtime_context_prune_sent',
+    'client.realtime_response_create_timeout',
+    'client.realtime_response_watchdog_released',
+    'client.realtime_sdp_request',
+    'client.realtime_sdp_response',
+    'client.realtime_start_skipped',
+    'client.realtime_stop_skipped',
+    'client.realtime_token_request',
+    'client.realtime_voice_mismatch',
+    'client.session_configured',
+    'client.session_ready_timeout',
+    'client.unparsed_message',
+    'client.user_transcription_failed',
+    'client.user_turn_accepted'
+  ].includes(type);
+}
+
 function safeCount(value) {
   const count = Number(value);
   if (!Number.isFinite(count) || count < 0) return 0;
@@ -210,6 +345,7 @@ module.exports = {
   hasLogStorageConfig,
   sessionsClient,
   itemsClient,
+  diagnosticsClient,
   safeSessionId,
   itemPartitionKey,
   odataString,
@@ -217,6 +353,8 @@ module.exports = {
   patchSessionEntity,
   normalizeItems,
   normalizeLogItem,
+  normalizeDiagnosticEvents,
+  normalizeDiagnosticEvent,
   sessionDto,
   itemDto
 };
