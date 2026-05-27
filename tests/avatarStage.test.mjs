@@ -3,7 +3,9 @@ import test from 'node:test';
 import {
   calculateStageBubbleMaxWidth,
   calculateVRPanelDepth,
+  calculateVRTextCanvasMetrics,
   fitCanvasText,
+  getRendererProfile,
   normalizeStageText,
   wrapCanvasText
 } from '../avatarStageUtils.mjs';
@@ -32,6 +34,53 @@ test('VR panel depth clamps invalid indexes and counts', () => {
   assert.equal(calculateVRPanelDepth(0.06, -1, 3), 0.036);
   assert.equal(calculateVRPanelDepth(0.06, 99, 3), 0.06);
   assert.equal(calculateVRPanelDepth(0.06, 0, 0), 0.06);
+});
+
+test('Quest renderer profile keeps VR quality settings enabled', () => {
+  const profile = getRendererProfile({
+    userAgent: 'Mozilla/5.0 (X11; Linux x86_64) OculusBrowser MetaQuest Quest 3',
+    deviceMemory: 4,
+    hardwareConcurrency: 6
+  });
+
+  assert.deepEqual(profile, {
+    name: 'quest-vr-quality',
+    antialias: true,
+    maxPixelRatio: 2,
+    precision: 'highp',
+    xrFramebufferScaleFactor: 1.4,
+    vrTextTextureScale: 2
+  });
+});
+
+test('non-Quest low-power renderer profile keeps lightweight settings', () => {
+  const profile = getRendererProfile({
+    userAgent: 'Mozilla/5.0 (Linux; Android 13) Mobile Safari/537.36',
+    deviceMemory: 4,
+    hardwareConcurrency: 6
+  });
+
+  assert.deepEqual(profile, {
+    name: 'low-power',
+    antialias: false,
+    maxPixelRatio: 1,
+    precision: 'mediump',
+    xrFramebufferScaleFactor: 1,
+    vrTextTextureScale: 1
+  });
+});
+
+test('VR text canvas metrics increase density without changing logical aspect', () => {
+  const metrics = calculateVRTextCanvasMetrics({
+    panelWidth: 1.48,
+    panelHeight: 0.32,
+    textureScale: 2
+  });
+
+  assert.equal(metrics.logicalWidth, 1024);
+  assert.equal(metrics.canvasWidth, 2048);
+  assert.equal(metrics.textureScale, 2);
+  assert.equal(metrics.minLogicalHeight, Math.round(1024 * (0.32 / 1.48)));
 });
 
 test('canvas text wrapper truncates long text by measured width', () => {

@@ -4,8 +4,10 @@ import {
   STAGE_TRANSCRIPT_LIMIT,
   calculateStageBubbleMaxWidth,
   calculateVRPanelDepth,
+  calculateVRTextCanvasMetrics,
   drawBubbleShape,
   fitCanvasText,
+  getRendererProfile,
   normalizeStageText,
   setCanvasTextFont,
   wrapCanvasText
@@ -14,8 +16,10 @@ import {
 export {
   calculateStageBubbleMaxWidth,
   calculateVRPanelDepth,
+  calculateVRTextCanvasMetrics,
   drawBubbleShape,
   fitCanvasText,
+  getRendererProfile,
   normalizeStageText,
   wrapCanvasText
 } from './avatarStageUtils.mjs';
@@ -111,7 +115,11 @@ export function createAvatarStage({
     resetStageCamera(camera, cameraRig);
     cameraRig.add(camera);
 
-    const rendererProfile = getRendererProfile();
+    const rendererProfile = getRendererProfile({
+      userAgent: navigator.userAgent || '',
+      deviceMemory: navigator.deviceMemory,
+      hardwareConcurrency: navigator.hardwareConcurrency
+    });
     const renderer = new THREE.WebGLRenderer({
       antialias: rendererProfile.antialias,
       alpha: false,
@@ -124,6 +132,7 @@ export function createAvatarStage({
     renderer.toneMappingExposure = 1.08;
     renderer.xr.enabled = true;
     renderer.xr.setReferenceSpaceType('local-floor');
+    renderer.xr.setFramebufferScaleFactor?.(rendererProfile.xrFramebufferScaleFactor);
     els.stage.appendChild(renderer.domElement);
     const vrButton = VRButton.createButton(renderer);
     vrButton.classList.add('stageVrButton');
@@ -747,8 +756,13 @@ export function createAvatarStage({
 
   function createVRTextPanel(text, options) {
     const canvas = document.createElement('canvas');
-    canvas.width = 1024;
-    const minCanvasHeight = Math.round(canvas.width * (options.height / options.width));
+    const canvasMetrics = calculateVRTextCanvasMetrics({
+      panelWidth: options.width,
+      panelHeight: options.height,
+      textureScale: state.rendererProfile?.vrTextTextureScale
+    });
+    const { logicalWidth, canvasWidth, textureScale } = canvasMetrics;
+    canvas.width = canvasWidth;
     let ctx = canvas.getContext('2d');
     const paddingX = 78;
     const paddingY = 38;
@@ -757,7 +771,7 @@ export function createAvatarStage({
     const tailSize = options.tail === 'none' ? 0 : 54;
     const bottomTailSize = bottomTail ? tailSize : 0;
     const rectX = options.tail === 'left' ? tailSize : 0;
-    const rectWidth = canvas.width - (sideTail ? tailSize : 0);
+    const rectWidth = logicalWidth - (sideTail ? tailSize : 0);
     const maxTextWidth = rectWidth - paddingX * 2;
     const maxLines = options.truncate === false
       ? Infinity
@@ -778,10 +792,12 @@ export function createAvatarStage({
       };
     const { fontSize, lines } = textLayout;
     const lineHeight = fontSize * 1.24;
-    const bodyCanvasHeight = Math.max(minCanvasHeight, Math.ceil(paddingY * 2 + lines.length * lineHeight + 28));
-    canvas.height = bodyCanvasHeight + bottomTailSize;
+    const bodyCanvasHeight = Math.max(canvasMetrics.minLogicalHeight, Math.ceil(paddingY * 2 + lines.length * lineHeight + 28));
+    const logicalHeight = bodyCanvasHeight + bottomTailSize;
+    canvas.height = Math.max(1, Math.round(logicalHeight * textureScale));
     ctx = canvas.getContext('2d');
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.scale(textureScale, textureScale);
+    ctx.clearRect(0, 0, logicalWidth, logicalHeight);
     ctx.fillStyle = options.background;
     ctx.shadowColor = 'rgba(0, 0, 0, 0.28)';
     ctx.shadowBlur = 26;
@@ -805,6 +821,9 @@ export function createAvatarStage({
 
     const texture = new THREE.CanvasTexture(canvas);
     texture.colorSpace = THREE.SRGBColorSpace;
+    texture.minFilter = THREE.LinearFilter;
+    texture.magFilter = THREE.LinearFilter;
+    texture.anisotropy = Math.min(4, state.renderer?.capabilities?.getMaxAnisotropy?.() || 1);
     texture.needsUpdate = true;
 
     const mesh = new THREE.Mesh(
@@ -1022,25 +1041,6 @@ async function loadRenderingModules() {
   createVRMAnimationClip = vrmAnimationModule.createVRMAnimationClip;
   VRMAnimationLoaderPlugin = vrmAnimationModule.VRMAnimationLoaderPlugin;
   VRMLookAtQuaternionProxy = vrmAnimationModule.VRMLookAtQuaternionProxy;
-}
-
-function getRendererProfile() {
-  const lowPower = isLowPowerRendererDevice();
-  return {
-    name: lowPower ? 'low-power' : 'desktop',
-    antialias: !lowPower,
-    maxPixelRatio: lowPower ? 1 : 2,
-    precision: lowPower ? 'mediump' : 'highp'
-  };
-}
-
-function isLowPowerRendererDevice() {
-  const userAgent = navigator.userAgent || '';
-  if (/Quest|OculusBrowser|MetaQuest/i.test(userAgent)) return true;
-  const deviceMemory = Number(navigator.deviceMemory || 0);
-  if (deviceMemory > 0 && deviceMemory <= 4) return true;
-  const hardwareConcurrency = Number(navigator.hardwareConcurrency || 0);
-  return hardwareConcurrency > 0 && hardwareConcurrency <= 6;
 }
 
 async function fetchArrayBufferWithProgress(url, onProgress = () => {}) {

@@ -4,6 +4,67 @@ export const STAGE_BUBBLE_MIN_PX = 72;
 export const STAGE_BUBBLE_AVATAR_GAP_PX = 22;
 export const STAGE_BUBBLE_EDGE_INSET_PX = 26;
 export const VR_PANEL_DEPTH_STEP = 0.012;
+export const VR_TEXT_CANVAS_BASE_WIDTH = 1024;
+
+export function getRendererProfile({
+  userAgent = '',
+  deviceMemory = 0,
+  hardwareConcurrency = 0
+} = {}) {
+  if (isQuestRendererDevice(userAgent)) {
+    return {
+      name: 'quest-vr-quality',
+      antialias: true,
+      maxPixelRatio: 2,
+      precision: 'highp',
+      xrFramebufferScaleFactor: 1.4,
+      vrTextTextureScale: 2
+    };
+  }
+
+  const lowPower = isLowPowerRendererDevice({ deviceMemory, hardwareConcurrency });
+  return {
+    name: lowPower ? 'low-power' : 'desktop',
+    antialias: !lowPower,
+    maxPixelRatio: lowPower ? 1 : 2,
+    precision: lowPower ? 'mediump' : 'highp',
+    xrFramebufferScaleFactor: 1,
+    vrTextTextureScale: lowPower ? 1 : 2
+  };
+}
+
+export function isQuestRendererDevice(userAgent = '') {
+  return /Quest|OculusBrowser|MetaQuest/i.test(String(userAgent || ''));
+}
+
+export function isLowPowerRendererDevice({
+  deviceMemory = 0,
+  hardwareConcurrency = 0
+} = {}) {
+  const safeDeviceMemory = Number(deviceMemory || 0);
+  if (safeDeviceMemory > 0 && safeDeviceMemory <= 4) return true;
+  const safeHardwareConcurrency = Number(hardwareConcurrency || 0);
+  return safeHardwareConcurrency > 0 && safeHardwareConcurrency <= 6;
+}
+
+export function calculateVRTextCanvasMetrics({
+  panelWidth,
+  panelHeight,
+  textureScale = 1,
+  baseWidth = VR_TEXT_CANVAS_BASE_WIDTH
+}) {
+  const safePanelWidth = Number(panelWidth) > 0 ? Number(panelWidth) : 1;
+  const safePanelHeight = Number(panelHeight) > 0 ? Number(panelHeight) : safePanelWidth;
+  const safeScale = Number(textureScale) > 0 ? Number(textureScale) : 1;
+  const logicalWidth = Math.max(1, Math.round(Number(baseWidth) || VR_TEXT_CANVAS_BASE_WIDTH));
+  const canvasWidth = Math.max(1, Math.round(logicalWidth * safeScale));
+  return {
+    logicalWidth,
+    canvasWidth,
+    textureScale: safeScale,
+    minLogicalHeight: Math.round(logicalWidth * (safePanelHeight / safePanelWidth))
+  };
+}
 
 export function calculateStageBubbleMaxWidth(availableWidth) {
   return Math.max(
