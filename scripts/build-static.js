@@ -9,10 +9,13 @@ const files = [
   'index.html',
   'styles.css',
   'app.js',
+  'appUtils.mjs',
   'avatarStage.mjs',
+  'avatarStageUtils.mjs',
   'coachAdviceClient.mjs',
   'conversationLogClient.mjs',
   'realtimeConversationEngine.mjs',
+  'realtimeConversationUtils.mjs',
   'staticwebapp.config.json'
 ];
 

@@ -1,4 +1,33 @@
 import { compactStageText, createAvatarStage } from './avatarStage.mjs';
+import {
+  ADVISOR_TRANSCRIPT_GRACE_MS,
+  DEVELOPER_ONLY_TABS,
+  DIAGNOSTIC_LOG_LIMIT,
+  PUBLIC_PERIOD_ENDED_MESSAGE,
+  canUseDeveloperTools,
+  canUseInteractiveFeatures,
+  canWriteLogs,
+  compactEvent,
+  escapeHtml,
+  finiteNumber,
+  formatApiError,
+  formatLogDate,
+  isActiveRealtimeSession,
+  isDeveloperAccount,
+  labelToClass,
+  latestTranscriptByRole,
+  microphoneAudioConstraints,
+  normalizeAdvisorDeploymentSetting,
+  normalizeNoiseReductionSetting,
+  normalizePublicAccess,
+  safeJson,
+  safeTrackSettings,
+  scrollToBottom,
+  setHidden,
+  shouldShowStageAdvice,
+  transcriptBySourceId,
+  transcriptTimingMeta
+} from './appUtils.mjs';
 import { createCoachAdviceClient } from './coachAdviceClient.mjs';
 import { createConversationLogClient } from './conversationLogClient.mjs';
 import { createRealtimeConversationEngine } from './realtimeConversationEngine.mjs';
@@ -19,12 +48,6 @@ const defaultSettings = Object.freeze({
   realtimeInstructions: `あなたは雑談訓練用アバターです。目的は、在宅勤務に慣れた社員がオフィスで自然に短い雑談をできるようにすることです。\n\n制約:\n- 日本語で話す。\n- 返答は原則1文、長くても2文。\n- 最初の反応は短い相づち、共感、軽い質問を優先する。\n- 相手を評価しすぎない。\n- ビジネス上の機密、医療、法律、金融の助言は避ける。\n- 会話のテンポを最優先し、考え込まない。`,
   advisorInstructions: `あなたは会話練習のリアルタイム助言AIです。入力JSONの speaker="user" は訓練者本人で、画面では「あなた」と表示されます。speaker="avatar" は会話相手のAIアバターで、画面では「アバター」と表示されます。アバター発話をあなた自身の返答や訓練者発話として扱わないでください。\n\n助言対象:\n- latest_user_utterance がある場合、その user 発話だけを評価する。\n- conversation_log の avatar 発話は文脈としてだけ使う。\n- latest_user_utterance が null の場合だけ、アバター応答から状況を控えめに推定し、訓練者の発話内容を断定しない。\n\n出力形式:\n{ "label": "good|warn|risk", "advice": "1〜3文の日本語助言", "reason": "短い理由" }\n\n評価軸:\n- ユーザー発話が会話として成立しているか。\n- なごやかで居心地の良い雰囲気を維持しようとしているか。\n- ユーザーが自分の話したいことだけを話していないか。\n- 相手の話題に反復できているか。\n\n制約:\n- 返答はJSONのみ。\n- 速度優先。`
 });
-
-const ADVISOR_TRANSCRIPT_GRACE_MS = 1200;
-const DIAGNOSTIC_LOG_LIMIT = 1000;
-const DEVELOPER_ACCOUNT_EMAILS = Object.freeze(['developer@example.com']);
-const DEVELOPER_ONLY_TABS = Object.freeze(['metrics', 'events']);
-const PUBLIC_PERIOD_ENDED_MESSAGE = '公開期間を終了しました';
 
 const serverSettingKeys = Object.freeze([
   'realtimeDeployment',
@@ -134,7 +157,7 @@ const realtimeEngine = createRealtimeConversationEngine({
 });
 
 const conversationLog = createConversationLogClient({
-  canPersist: () => canWriteLogs(),
+  canPersist: () => canWriteLogs(state.authUser, state.publicAccess),
   getTranscript: () => state.transcript,
   summarizeTitle: compactStageText,
   onError: (event) => logEvent(event)
@@ -143,8 +166,8 @@ const conversationLog = createConversationLogClient({
 const coachAdvice = createCoachAdviceClient({
   getSettings: () => state.settings,
   getTranscript: () => state.transcript,
-  isActiveSession: isActiveRealtimeSession,
-  canBenchmark: canUseDeveloperTools,
+  isActiveSession: (sessionId) => isActiveRealtimeSession(sessionId, state.activeRealtimeSessionId),
+  canBenchmark: () => canUseDeveloperTools(state.developerToolsEnabled),
   confirm: (message) => window.confirm(message),
   addAdvice,
   addMetric,
@@ -192,35 +215,17 @@ function loadSettings() {
     if (!Number.isFinite(Number(settings.vadMinSpeechMs)) || Number(settings.vadMinSpeechMs) < 0 || Number(settings.vadMinSpeechMs) > 2000) {
       settings.vadMinSpeechMs = defaultSettings.vadMinSpeechMs;
     }
-    settings.noiseReduction = normalizeNoiseReductionSetting(settings.noiseReduction);
+    settings.noiseReduction = normalizeNoiseReductionSetting(settings.noiseReduction, defaultSettings.noiseReduction);
     return settings;
   } catch {
     return { ...defaultSettings };
   }
 }
 
-function normalizeAdvisorDeploymentSetting(value) {
-  const raw = String(value || '').trim();
-  const aliases = {
-    'kimi-2.6': 'Kimi-K2.6',
-    'kimi-k2.6': 'Kimi-K2.6',
-    'kimi-k2-6': 'Kimi-K2.6',
-    'kimi-2.5': 'Kimi-K2.5',
-    'kimi-k2.5': 'Kimi-K2.5',
-    'kimi-k2-5': 'Kimi-K2.5'
-  };
-  return aliases[raw.toLowerCase()] || raw;
-}
-
-function normalizeNoiseReductionSetting(value) {
-  const mode = String(value || defaultSettings.noiseReduction).trim().toLowerCase();
-  return ['far_field', 'near_field', 'off'].includes(mode) ? mode : defaultSettings.noiseReduction;
-}
-
 function saveSettings(next) {
   state.settings = { ...defaultSettings, ...next };
   state.settings.advisorDeployment = normalizeAdvisorDeploymentSetting(state.settings.advisorDeployment);
-  state.settings.noiseReduction = normalizeNoiseReductionSetting(state.settings.noiseReduction);
+  state.settings.noiseReduction = normalizeNoiseReductionSetting(state.settings.noiseReduction, defaultSettings.noiseReduction);
   state.settings.benchmarkAdvisorDeployments = String(state.settings.benchmarkAdvisorDeployments || '')
     .split(',')
     .map((name) => normalizeAdvisorDeploymentSetting(name.trim()))
@@ -294,7 +299,7 @@ async function loadAuthState() {
 
 function renderAuthState() {
   const details = state.authUser?.userDetails || '';
-  const interactiveAllowed = canUseInteractiveFeatures();
+  const interactiveAllowed = canUseInteractiveFeatures(state.authUser, state.publicAccess);
   const publicClosed = state.authUser && !interactiveAllowed;
   if (els.accountStatus) {
     els.accountStatus.textContent = details ? `account: ${details}` : 'account: local/anonymous';
@@ -332,31 +337,6 @@ function renderAuthState() {
   } else if (state.authUser && location.pathname === '/login') {
     history.replaceState(null, '', '/');
   }
-}
-
-function normalizePublicAccess(value, principal) {
-  const access = value && typeof value === 'object' ? value : {};
-  const ended = Boolean(access.ended);
-  const exempt = Boolean(access.exempt);
-  const authenticated = Boolean(principal);
-  const canUse = access.canUseInteractiveFeatures !== undefined
-    ? Boolean(access.canUseInteractiveFeatures)
-    : authenticated && (!ended || exempt);
-  return {
-    ended,
-    exempt,
-    canUseInteractiveFeatures: canUse,
-    logAccess: String(access.logAccess || (authenticated ? (ended && !exempt ? 'read-only' : 'read-write') : 'none')),
-    message: String(access.message || (ended && !exempt ? PUBLIC_PERIOD_ENDED_MESSAGE : ''))
-  };
-}
-
-function canUseInteractiveFeatures() {
-  return Boolean(state.authUser && state.publicAccess.canUseInteractiveFeatures);
-}
-
-function canWriteLogs() {
-  return Boolean(state.authUser && state.publicAccess.logAccess === 'read-write');
 }
 
 async function loginWithEmail(event) {
@@ -399,7 +379,7 @@ function activateTab(name) {
 }
 
 function renderDeveloperControls() {
-  const enabled = canUseDeveloperTools();
+  const enabled = canUseDeveloperTools(state.developerToolsEnabled);
   setHidden(els.btnHealth, !enabled);
   setHidden(els.btnSettings, !enabled);
   for (const name of DEVELOPER_ONLY_TABS) {
@@ -416,10 +396,6 @@ function renderDeveloperControls() {
       activateTab('advice');
     }
   }
-}
-
-function setHidden(el, hidden) {
-  if (el) el.hidden = Boolean(hidden);
 }
 
 function setPageLoading(loading, text = 'ページを読み込んでいます') {
@@ -441,7 +417,7 @@ function setConnectionLoading(loading, text = '') {
   if (els.btnConnect) {
     els.btnConnect.classList.toggle('busy', state.connectionLoading);
     els.btnConnect.textContent = state.connectionLoading ? '接続中' : '接続開始';
-    els.btnConnect.disabled = !state.authUser || !canUseInteractiveFeatures() || state.realtimeStarting || state.connectionLoading || Boolean(state.pc || state.dataChannel);
+    els.btnConnect.disabled = !state.authUser || !canUseInteractiveFeatures(state.authUser, state.publicAccess) || state.realtimeStarting || state.connectionLoading || Boolean(state.pc || state.dataChannel);
   }
   if (els.connectionStatus) {
     els.connectionStatus.classList.toggle('busy', state.connectionLoading);
@@ -460,54 +436,6 @@ function renderStageLoading() {
   if (els.stageLoadingText && text) els.stageLoadingText.textContent = text;
   els.stageLoading.classList.toggle('is-hidden', !visible);
   els.stageLoading.setAttribute('aria-hidden', visible ? 'false' : 'true');
-}
-
-function canUseDeveloperTools() {
-  return Boolean(state.developerToolsEnabled);
-}
-
-function isDeveloperAccount(principal) {
-  const allowed = new Set(DEVELOPER_ACCOUNT_EMAILS);
-  return principalIdentityValues(principal).some((value) => allowed.has(value));
-}
-
-function principalIdentityValues(principal) {
-  if (!principal) return [];
-  const values = [
-    principal.userDetails,
-    claimValue(principal, 'email'),
-    claimValue(principal, 'emailaddress'),
-    claimValue(principal, 'emails'),
-    claimValue(principal, 'preferred_username'),
-    claimValue(principal, 'upn'),
-    claimValue(principal, 'unique_name')
-  ];
-  return values
-    .flatMap(expandIdentityValue)
-    .map((value) => value.trim().toLowerCase())
-    .filter(Boolean);
-}
-
-function expandIdentityValue(value) {
-  if (Array.isArray(value)) return value.flatMap(expandIdentityValue);
-  const text = String(value || '').trim();
-  if (!text) return [];
-  try {
-    const parsed = JSON.parse(text);
-    if (Array.isArray(parsed)) return parsed.flatMap(expandIdentityValue);
-  } catch {
-    // Not JSON; split common multi-value claim formats below.
-  }
-  return text.split(/[;,]/);
-}
-
-function claimValue(principal, name) {
-  const claims = Array.isArray(principal?.claims) ? principal.claims : [];
-  const match = claims.find((claim) => {
-    const type = String(claim.typ || claim.type || claim.name || '').toLowerCase();
-    return type === name || type.endsWith(`/${name}`);
-  });
-  return match?.val || match?.value || '';
 }
 
 function initSettingsDialog() {
@@ -603,7 +531,7 @@ function resetLipSyncAudio() {
 }
 
 function ensureRealtimeForVR() {
-  if (!canUseInteractiveFeatures()) return;
+  if (!canUseInteractiveFeatures(state.authUser, state.publicAccess)) return;
   if (state.realtimeStarting || state.pc || state.dataChannel) return;
   logEvent({ type: 'client.vr_realtime_autostart', sessionId: state.activeRealtimeSessionId });
   void startRealtime();
@@ -615,7 +543,7 @@ async function startRealtime() {
     if (els.loginError) els.loginError.textContent = 'ログインしてから接続してください。';
     return;
   }
-  if (!canUseInteractiveFeatures()) {
+  if (!canUseInteractiveFeatures(state.authUser, state.publicAccess)) {
     addAdvice('app', PUBLIC_PERIOD_ENDED_MESSAGE, 'warn');
     renderAuthState();
     return;
@@ -658,7 +586,7 @@ async function startRealtime() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(tokenPayload)
     });
-    if (!isActiveRealtimeSession(sessionId)) return;
+    if (!isActiveRealtimeSession(sessionId, state.activeRealtimeSessionId)) return;
     const tokenData = await safeJson(tokenResponse);
     if (!tokenResponse.ok) throw new Error(tokenData.error || `token failed: ${tokenResponse.status}`);
     if (!tokenData.token || !tokenData.webrtcUrl) throw new Error('token response is missing token or webrtcUrl');
@@ -670,7 +598,7 @@ async function startRealtime() {
     setConnectionLoading(true, 'マイクの許可を待っています');
     setConnectionStatus('microphone');
     const mediaStream = await getMicrophoneMediaStream(sessionId);
-    if (!isActiveRealtimeSession(sessionId)) {
+    if (!isActiveRealtimeSession(sessionId, state.activeRealtimeSessionId)) {
       mediaStream.getTracks().forEach((track) => track.stop());
       return;
     }
@@ -681,19 +609,19 @@ async function startRealtime() {
     state.sessionStartedAt = performance.now();
 
     pc.ontrack = (event) => {
-      if (!isActiveRealtimeSession(sessionId)) return;
+      if (!isActiveRealtimeSession(sessionId, state.activeRealtimeSessionId)) return;
       if (event.streams?.[0]) {
         els.remoteAudio.srcObject = event.streams[0];
         attachLipSyncAudioStream(event.streams[0]);
       }
     };
     pc.onconnectionstatechange = () => {
-      if (!isActiveRealtimeSession(sessionId)) return;
+      if (!isActiveRealtimeSession(sessionId, state.activeRealtimeSessionId)) return;
       logEvent({ type: 'client.connection_state', sessionId, state: pc.connectionState });
       setConnectionStatus(pc.connectionState);
     };
     pc.oniceconnectionstatechange = () => {
-      if (!isActiveRealtimeSession(sessionId)) return;
+      if (!isActiveRealtimeSession(sessionId, state.activeRealtimeSessionId)) return;
       logEvent({ type: 'client.ice_state', sessionId, state: pc.iceConnectionState });
     };
 
@@ -707,7 +635,7 @@ async function startRealtime() {
     wireDataChannel(dc, sessionId);
 
     const offer = await pc.createOffer();
-    if (!isActiveRealtimeSession(sessionId)) return;
+    if (!isActiveRealtimeSession(sessionId, state.activeRealtimeSessionId)) return;
     await pc.setLocalDescription(offer);
 
     const url = new URL(tokenData.webrtcUrl);
@@ -733,7 +661,7 @@ async function startRealtime() {
         'Content-Type': 'application/sdp'
       }
     });
-    if (!isActiveRealtimeSession(sessionId)) return;
+    if (!isActiveRealtimeSession(sessionId, state.activeRealtimeSessionId)) return;
     const answerSdp = await sdpResponse.text();
     if (!sdpResponse.ok) throw new Error(`SDP failed ${sdpResponse.status}: ${answerSdp.slice(0, 300)}`);
 
@@ -750,25 +678,25 @@ async function startRealtime() {
     els.btnConnect.disabled = false;
     stopRealtime(false, sessionId);
   } finally {
-    if (isActiveRealtimeSession(sessionId)) state.realtimeStarting = false;
+    if (isActiveRealtimeSession(sessionId, state.activeRealtimeSessionId)) state.realtimeStarting = false;
   }
 }
 
 function wireDataChannel(dc, sessionId) {
   dc.addEventListener('open', () => {
-    if (!isActiveRealtimeSession(sessionId)) return;
+    if (!isActiveRealtimeSession(sessionId, state.activeRealtimeSessionId)) return;
     realtimeEngine.handleDataChannelOpen();
   });
   dc.addEventListener('close', () => {
-    if (!isActiveRealtimeSession(sessionId)) return;
+    if (!isActiveRealtimeSession(sessionId, state.activeRealtimeSessionId)) return;
     realtimeEngine.handleDataChannelClose();
   });
   dc.addEventListener('error', (event) => {
-    if (!isActiveRealtimeSession(sessionId)) return;
+    if (!isActiveRealtimeSession(sessionId, state.activeRealtimeSessionId)) return;
     realtimeEngine.handleDataChannelError(event);
   });
   dc.addEventListener('message', (event) => {
-    if (!isActiveRealtimeSession(sessionId)) return;
+    if (!isActiveRealtimeSession(sessionId, state.activeRealtimeSessionId)) return;
     try {
       const realtimeEvent = JSON.parse(event.data);
       realtimeEngine.handleServerEvent(realtimeEvent);
@@ -798,14 +726,6 @@ async function getMicrophoneMediaStream(sessionId) {
   }
 }
 
-function microphoneAudioConstraints(echoCancellation) {
-  return {
-    echoCancellation,
-    noiseSuppression: true,
-    autoGainControl: true
-  };
-}
-
 function logMicrophoneCaptureSettings(sessionId, mode, constraints, stream) {
   const tracks = stream.getAudioTracks().map((track) => ({
     label: track.label || '',
@@ -820,14 +740,6 @@ function logMicrophoneCaptureSettings(sessionId, mode, constraints, stream) {
     constraints,
     tracks
   });
-}
-
-function safeTrackSettings(track) {
-  try {
-    return track.getSettings?.() || {};
-  } catch {
-    return {};
-  }
 }
 
 function handleRealtimeEffect(effect) {
@@ -887,12 +799,8 @@ function sendRealtimeClientEvent(event) {
   state.dataChannel.send(JSON.stringify(event));
 }
 
-function isActiveRealtimeSession(sessionId) {
-  return Number(sessionId) === state.activeRealtimeSessionId;
-}
-
 function setMicrophoneTracksEnabled(enabled, reason = 'manual', sessionId = state.activeRealtimeSessionId) {
-  if (!isActiveRealtimeSession(sessionId)) return;
+  if (!isActiveRealtimeSession(sessionId, state.activeRealtimeSessionId)) return;
   state.microphoneEnabled = Boolean(enabled);
   state.mediaStream?.getAudioTracks().forEach((track) => {
     track.enabled = Boolean(enabled);
@@ -904,10 +812,10 @@ function scheduleAdvisorFromRealtimeResponse(sessionId, responseId, assistantTex
   const speechStoppedAt = Number(diagnostics.userPerfAt) || 0;
   const userItemId = String(diagnostics.userItemId || '');
   setTimeout(() => {
-    if (!isActiveRealtimeSession(sessionId)) return;
+    if (!isActiveRealtimeSession(sessionId, state.activeRealtimeSessionId)) return;
     const latestUser = userItemId
-      ? transcriptBySourceId('user', userItemId)
-      : latestTranscriptByRole('user', speechStoppedAt);
+      ? transcriptBySourceId(state.transcript, 'user', userItemId)
+      : latestTranscriptByRole(state.transcript, 'user', speechStoppedAt);
     if (latestUser) {
       requestAdvisor('user', latestUser.text, {
         sessionId,
@@ -934,53 +842,8 @@ function scheduleAdvisorFromRealtimeResponse(sessionId, responseId, assistantTex
   }, ADVISOR_TRANSCRIPT_GRACE_MS);
 }
 
-function transcriptBySourceId(role, sourceId) {
-  if (!sourceId) return null;
-  for (let i = state.transcript.length - 1; i >= 0; i -= 1) {
-    const item = state.transcript[i];
-    if (item?.role === role && item?.sourceId === sourceId && item.text) return item;
-  }
-  return null;
-}
-
-function latestTranscriptByRole(role, minPerfAt = 0) {
-  for (let i = state.transcript.length - 1; i >= 0; i -= 1) {
-    if (state.transcript[i]?.role === role && state.transcript[i]?.text && Number(state.transcript[i].perfAt || 0) >= minPerfAt) {
-      return state.transcript[i];
-    }
-  }
-  return null;
-}
-
-function transcriptTimingMeta(item) {
-  if (!item) return {};
-  return {
-    latestUserItemId: item.sourceId || '',
-    latestUserStartPerfAt: finiteNumber(item.startPerfAt),
-    latestUserEndPerfAt: finiteNumber(item.endPerfAt || item.perfAt),
-    latestUserDurationMs: finiteNumber(item.durationMs),
-    latestUserAvatarOverlapMs: finiteNumber(item.avatarOverlapMs),
-    latestUserOverlappedAvatar: Boolean(item.overlappedAvatar)
-  };
-}
-
-function formatApiError(data, fallback) {
-  if (!data || typeof data !== 'object') return fallback;
-  const parts = [data.error || fallback];
-  const details = [];
-  if (data.status) details.push(`status=${data.status}`);
-  if (data.deployment) details.push(`deployment=${data.deployment}`);
-  if (data.endpointHost) details.push(`endpoint=${data.endpointHost}`);
-  if (data.apiVersion) details.push(`api=${data.apiVersion}`);
-  const requestId = data.requestIds?.['apim-request-id'] || data.requestIds?.['x-ms-request-id'];
-  if (requestId) details.push(`requestId=${requestId}`);
-  if (data.azureError?.code) details.push(`code=${data.azureError.code}`);
-  if (details.length) parts.push(`(${details.join(', ')})`);
-  return parts.join(' ');
-}
-
 async function stopRealtime(showMessage = true, sessionId = state.activeRealtimeSessionId) {
-  if (!isActiveRealtimeSession(sessionId)) {
+  if (!isActiveRealtimeSession(sessionId, state.activeRealtimeSessionId)) {
     logEvent({ type: 'client.realtime_stop_skipped', reason: 'stale_session', sessionId });
     return;
   }
@@ -1013,7 +876,7 @@ async function stopRealtime(showMessage = true, sessionId = state.activeRealtime
   avatarStage.setAvatarSpeaking(false);
   coachAdvice.resetQueue();
   setConnectionLoading(false);
-  els.btnConnect.disabled = !canUseInteractiveFeatures();
+  els.btnConnect.disabled = !canUseInteractiveFeatures(state.authUser, state.publicAccess);
   els.btnDisconnect.disabled = true;
   setConnectionStatus('idle');
   setAvatarMood('neutral');
@@ -1027,7 +890,7 @@ async function sendText() {
     if (els.loginError) els.loginError.textContent = 'ログインしてから送信してください。';
     return;
   }
-  if (!canUseInteractiveFeatures()) {
+  if (!canUseInteractiveFeatures(state.authUser, state.publicAccess)) {
     addAdvice('app', PUBLIC_PERIOD_ENDED_MESSAGE, 'warn');
     renderAuthState();
     return;
@@ -1127,10 +990,6 @@ function addAdvice(source, text, label = 'good', meta = '') {
   queueAdviceLog(source, text, label, meta);
 }
 
-function shouldShowStageAdvice(source) {
-  return /^LLM\b/.test(source) || /^instant\b/.test(source);
-}
-
 function setStageAdvice(text) {
   avatarStage.setAdvice(text);
 }
@@ -1196,13 +1055,13 @@ function renderSavedSessions(sessions) {
     card.addEventListener('click', () => loadSavedLogItems(session.sessionId));
     els.savedSessionsFeed.appendChild(card);
   }
-  if (els.btnDeleteLog) els.btnDeleteLog.disabled = !state.selectedSavedSessionId || !canWriteLogs();
+  if (els.btnDeleteLog) els.btnDeleteLog.disabled = !state.selectedSavedSessionId || !canWriteLogs(state.authUser, state.publicAccess);
 }
 
 async function loadSavedLogItems(sessionId) {
   if (!sessionId) return;
   state.selectedSavedSessionId = sessionId;
-  if (els.btnDeleteLog) els.btnDeleteLog.disabled = !canWriteLogs();
+  if (els.btnDeleteLog) els.btnDeleteLog.disabled = !canWriteLogs(state.authUser, state.publicAccess);
   try {
     const items = await conversationLog.loadItems(sessionId);
     renderSavedLogItems(items);
@@ -1236,7 +1095,7 @@ function renderSavedLogItems(items) {
 
 async function deleteSelectedSavedSession() {
   const sessionId = state.selectedSavedSessionId;
-  if (!canWriteLogs()) {
+  if (!canWriteLogs(state.authUser, state.publicAccess)) {
     addAdvice('app', PUBLIC_PERIOD_ENDED_MESSAGE, 'warn');
     return;
   }
@@ -1252,23 +1111,12 @@ async function deleteSelectedSavedSession() {
   }
 }
 
-function formatLogDate(value) {
-  const date = value ? new Date(value) : null;
-  if (!date || Number.isNaN(date.getTime())) return '';
-  return date.toLocaleString('ja-JP', { hour12: false });
-}
-
-function finiteNumber(value) {
-  const number = Number(value);
-  return Number.isFinite(number) ? number : 0;
-}
-
 function immediateAdvice(text) {
   coachAdvice.immediateAdvice(text);
 }
 
 async function requestAdvisor(role, latestText, meta = {}) {
-  if (!canUseInteractiveFeatures()) {
+  if (!canUseInteractiveFeatures(state.authUser, state.publicAccess)) {
     logEvent({ type: 'client.advisor_skipped', reason: 'public_period_ended', sessionId: meta.sessionId ?? null });
     return;
   }
@@ -1280,7 +1128,7 @@ async function benchmarkAdvisorModels() {
 }
 
 async function checkHealth() {
-  if (!canUseDeveloperTools()) return;
+  if (!canUseDeveloperTools(state.developerToolsEnabled)) return;
   try {
     const response = await fetch('/api/health');
     const data = await safeJson(response);
@@ -1293,7 +1141,7 @@ async function checkHealth() {
 }
 
 function addMetric(text) {
-  if (!canUseDeveloperTools()) return;
+  if (!canUseDeveloperTools(state.developerToolsEnabled)) return;
   const card = document.createElement('div');
   card.className = 'card';
   card.innerHTML = `<div class="meta"><span>metric</span><span>${new Date().toLocaleTimeString('ja-JP', { hour12: false })}</span></div><div class="body">${escapeHtml(text)}</div>`;
@@ -1302,7 +1150,7 @@ function addMetric(text) {
 }
 
 function logEvent(event) {
-  if (!canUseDeveloperTools()) return;
+  if (!canUseDeveloperTools(state.developerToolsEnabled)) return;
   const compact = compactEvent(event);
   state.diagnosticEvents.push({
     at: new Date().toISOString(),
@@ -1319,22 +1167,8 @@ function logEvent(event) {
   scrollToBottom(els.eventFeed);
 }
 
-function compactEvent(event) {
-  const clone = { ...event };
-  delete clone.token;
-  delete clone.client_secret;
-  delete clone.apiKey;
-  delete clone.Authorization;
-  if (typeof clone.instructions === 'string') clone.instructions = `[${clone.instructions.length} chars]`;
-  if (clone.session?.instructions) clone.session = { ...clone.session, instructions: `[${clone.session.instructions.length} chars]` };
-  if (clone.request?.messages) clone.request = { ...clone.request, messages: `[${clone.request.messages.length} messages]` };
-  if (typeof clone.delta === 'string' && clone.delta.length > 120) clone.delta = `${clone.delta.slice(0, 120)}…`;
-  if (typeof clone.transcript === 'string' && clone.transcript.length > 160) clone.transcript = `${clone.transcript.slice(0, 160)}…`;
-  return clone;
-}
-
 function exportDiagnosticEvents() {
-  if (!canUseDeveloperTools()) return;
+  if (!canUseDeveloperTools(state.developerToolsEnabled)) return;
   const lines = state.diagnosticEvents.map((event) => JSON.stringify(event));
   const blob = new Blob([`${lines.join('\n')}\n`], { type: 'application/x-ndjson' });
   const url = URL.createObjectURL(blob);
@@ -1349,29 +1183,4 @@ function exportDiagnosticEvents() {
 
 function setConnectionStatus(text) {
   els.connectionStatus.textContent = text;
-}
-
-function labelToClass(label) {
-  if (label === 'risk') return 'risk';
-  if (label === 'warn') return 'warn';
-  return 'good';
-}
-
-async function safeJson(response) {
-  const text = await response.text();
-  if (!text) return {};
-  try { return JSON.parse(text); } catch { return { text }; }
-}
-
-function scrollToBottom(el) {
-  requestAnimationFrame(() => { el.scrollTop = el.scrollHeight; });
-}
-
-function escapeHtml(value) {
-  return String(value)
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&#039;');
 }

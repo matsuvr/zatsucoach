@@ -255,6 +255,7 @@ function isDemoPasswordPrincipal(principal) {
   return principalIdentityValues(principal).some((value) => value === allowed);
 }
 
+// NOTE: Duplicated in appUtils.mjs (frontend ESM). Keep implementations in sync.
 function principalIdentityValues(principal) {
   const values = [
     principal?.userDetails,
@@ -271,6 +272,7 @@ function principalIdentityValues(principal) {
     .filter(Boolean);
 }
 
+// NOTE: Duplicated in appUtils.mjs (frontend ESM). Keep implementations in sync.
 function expandIdentityValue(value) {
   if (Array.isArray(value)) return value.flatMap(expandIdentityValue);
   const text = String(value || '').trim();
@@ -284,6 +286,7 @@ function expandIdentityValue(value) {
   return text.split(/[;,]/);
 }
 
+// NOTE: Duplicated in appUtils.mjs (frontend ESM). Keep implementations in sync.
 function claimValue(principal, name) {
   const claims = Array.isArray(principal?.claims) ? principal.claims : [];
   const match = claims.find((claim) => {

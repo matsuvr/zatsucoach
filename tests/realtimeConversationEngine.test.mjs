@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createRealtimeConversationEngine, hasUsefulTranscript, userTurnDecision } from '../realtimeConversationEngine.mjs';
+import { createRealtimeConversationEngine } from '../realtimeConversationEngine.mjs';
+import { hasUsefulTranscript, userTurnDecision } from '../realtimeConversationUtils.mjs';
 
 function createHarness(settings = {}) {
   let currentNow = 1000;

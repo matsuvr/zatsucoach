@@ -6,7 +6,7 @@ import {
   fitCanvasText,
   normalizeStageText,
   wrapCanvasText
-} from '../avatarStage.mjs';
+} from '../avatarStageUtils.mjs';
 
 test('stage bubble width clamps to configured bounds', () => {
   assert.equal(calculateStageBubbleMaxWidth(20), 72);
