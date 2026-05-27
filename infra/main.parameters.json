@@ -27,7 +27,7 @@
       "value": "${ADVISOR_API_ROUTE=openai_v1}"
     },
     "realtimeDeployment": {
-      "value": "${REALTIME_DEPLOYMENT=gpt-realtime-2}"
+      "value": "${REALTIME_DEPLOYMENT=gpt-realtime-1.5}"
     },
     "realtimeNoiseReduction": {
       "value": "${REALTIME_NOISE_REDUCTION=far_field}"

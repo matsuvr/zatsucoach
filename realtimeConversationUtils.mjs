@@ -128,6 +128,14 @@ export function formatAssistantIncompleteMessage(meta) {
   return detail ? `${reason} (${detail})` : reason;
 }
 
+export function formatAssistantIncompleteUserMessage(meta) {
+  const reason = assistantIncompleteReason(meta);
+  if (reason === 'content_filter') return '安全フィルターで停止しました。別の言い方で続けてください。';
+  if (!reason) return '';
+  const detail = formatAssistantIncompleteDiagnostic(meta);
+  return detail ? `${reason} (${detail})` : reason;
+}
+
 function cleanDiagnosticMessage(value) {
   return String(value || '')
     .replace(/\s+/g, ' ')

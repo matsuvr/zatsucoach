@@ -38,7 +38,7 @@ param advisorApiKey string = ''
 param advisorApiRoute string = 'openai_v1'
 
 @description('Realtime deployment name.')
-param realtimeDeployment string = 'gpt-realtime-2'
+param realtimeDeployment string = 'gpt-realtime-1.5'
 
 @description('Realtime noise reduction mode.')
 param realtimeNoiseReduction string = 'far_field'

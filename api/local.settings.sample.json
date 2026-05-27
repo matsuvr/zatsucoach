@@ -8,7 +8,7 @@
     "ADVISOR_ENDPOINT": "",
     "ADVISOR_API_KEY": "",
     "ADVISOR_API_ROUTE": "openai_v1",
-    "REALTIME_DEPLOYMENT": "gpt-realtime-2",
+    "REALTIME_DEPLOYMENT": "gpt-realtime-1.5",
     "REALTIME_NOISE_REDUCTION": "far_field",
     "ADVISOR_DEPLOYMENT": "grok-4-20-non-reasoning",
     "AVATAR_TEXT_DEPLOYMENT": "gpt-5.4-nano",

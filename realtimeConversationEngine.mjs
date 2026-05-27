@@ -9,6 +9,7 @@ import {
   TIMELINE_INTERVAL_KEEP_ITEMS,
   assistantIncompleteDiagnostic,
   formatAssistantIncompleteMessage,
+  formatAssistantIncompleteUserMessage,
   USER_TURN_TRANSCRIPT_WAIT_MS,
   assistantIncompleteReason,
   assistantResponseTimeline,
@@ -31,6 +32,7 @@ export {
   assistantIncompleteDiagnostic,
   assistantIncompleteReason,
   formatAssistantIncompleteMessage,
+  formatAssistantIncompleteUserMessage,
   estimateSpeechDurationMs,
   hasUsefulTranscript,
   userTurnDecision
@@ -990,6 +992,7 @@ export function createRealtimeConversationEngine({
       const incompleteReason = assistantIncompleteReason(meta);
       if (incompleteReason) {
         const incompleteMessage = formatAssistantIncompleteMessage(meta);
+        const userMessage = formatAssistantIncompleteUserMessage(meta);
         clearTimer(state.assistantResponseTimers.get(responseId));
         state.assistantResponseTimers.delete(responseId);
         state.assistantResponseMeta.delete(responseId);
@@ -1014,7 +1017,7 @@ export function createRealtimeConversationEngine({
         effect('addMetric', { text: `Realtime incomplete response: ${incompleteMessage || incompleteReason}` });
         effect('addAdvice', {
           source: 'app',
-          text: `Realtime応答が途中終了しました: ${incompleteMessage || incompleteReason}`,
+          text: `Realtime応答が途中終了しました: ${userMessage || incompleteMessage || incompleteReason}`,
           label: 'warn'
         });
       }
@@ -1038,6 +1041,7 @@ export function createRealtimeConversationEngine({
     if (!text) return;
     const incompleteReason = assistantIncompleteReason(meta);
     const incompleteMessage = formatAssistantIncompleteMessage(meta);
+    const userMessage = formatAssistantIncompleteUserMessage(meta);
     if (!incompleteReason) {
       effect('addTranscript', {
         role: 'assistant',
@@ -1071,7 +1075,7 @@ export function createRealtimeConversationEngine({
       effect('addMetric', { text: `Realtime incomplete response: ${incompleteMessage || incompleteReason}` });
       effect('addAdvice', {
         source: 'app',
-        text: `Realtime応答が途中終了しました: ${incompleteMessage || incompleteReason}`,
+        text: `Realtime応答が途中終了しました: ${userMessage || incompleteMessage || incompleteReason}`,
         label: 'warn'
       });
       return;

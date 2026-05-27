@@ -217,6 +217,30 @@ test('incomplete response warns and does not schedule advisor', () => {
   assert.equal(h.byType('addAdvice').some((effect) => effect.label === 'warn' && effect.text.includes('max_output_tokens')), true);
 });
 
+test('content filter response uses short user-facing warning and keeps diagnostics in events', () => {
+  const h = createHarness();
+  h.begin();
+  h.effects.length = 0;
+
+  h.engine.handleServerEvent({ type: 'response.created', response: { id: 'r1' } });
+  h.engine.handleServerEvent({
+    type: 'response.done',
+    response: {
+      id: 'r1',
+      status: 'incomplete',
+      status_details: { type: 'incomplete', reason: 'content_filter' },
+      usage: { total_tokens: 30, input_tokens: 20, output_tokens: 10 }
+    }
+  });
+
+  const warning = h.byType('addAdvice').find((effect) => effect.label === 'warn');
+  assert.match(warning.text, /安全フィルター/);
+  assert.doesNotMatch(warning.text, /tokens=|status=incomplete/);
+  const flushed = h.byType('logEvent').find((effect) => effect.event.type === 'client.assistant_response_flushed');
+  assert.equal(flushed.event.incompleteReason, 'content_filter');
+  assert.equal(flushed.event.incompleteDiagnostic.usage.total_tokens, 30);
+});
+
 test('context pruning deletes only older completed conversation items', () => {
   const h = createHarness();
   h.begin();

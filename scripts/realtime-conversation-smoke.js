@@ -40,7 +40,7 @@ Required:
 Common options:
   --advisor-url=https://example.azurestaticapps.net/api/advisor
   --token-url=https://example.azurestaticapps.net/api/realtime-token
-  --deployment=gpt-realtime-2
+  --deployment=gpt-realtime-1.5
   --advisor-deployment=grok-4-20-non-reasoning
   --chunk-seconds=4
   --max-chunks=4
@@ -209,7 +209,7 @@ async function main() {
   const local = loadLocalSettings();
   const endpoint = endpointBase(argValue('endpoint', process.env.AZURE_OPENAI_ENDPOINT || local.AZURE_OPENAI_ENDPOINT));
   const apiKey = argValue('api-key', process.env.AZURE_OPENAI_API_KEY || local.AZURE_OPENAI_API_KEY);
-  const realtimeDeployment = argValue('deployment', process.env.REALTIME_DEPLOYMENT || local.REALTIME_DEPLOYMENT || 'gpt-realtime-2');
+  const realtimeDeployment = argValue('deployment', process.env.REALTIME_DEPLOYMENT || local.REALTIME_DEPLOYMENT || 'gpt-realtime-1.5');
   const advisorUrl = argValue('advisor-url', 'https://delightful-mud-0f16e3300.7.azurestaticapps.net/api/advisor');
   const tokenUrl = argValue('token-url', advisorUrl.replace(/\/api\/advisor$/, '/api/realtime-token'));
   const health = hasArg('advisor-deployment') ? {} : await deployedHealth(advisorUrl).catch(() => ({}));
