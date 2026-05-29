@@ -64,7 +64,7 @@ param zatsucoachDemoEmail string = ''
 param zatsucoachDemoPasswordHash string = ''
 
 @description('Comma-separated emails that can access developer-only controls.')
-param zatsucoachDeveloperEmails string = 'developer@example.com'
+param zatsucoachDeveloperEmails string = ''
 
 var resourceToken = toLower(uniqueString(resourceGroup().id, environmentName, location))
 var staticWebAppName = 'stapp-zatsucoach-${resourceToken}'

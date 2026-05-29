@@ -64,6 +64,20 @@ function withDemoEmail(value, fn) {
   }
 }
 
+function withDeveloperEmails(value, fn) {
+  const previous = process.env.ZATSUCOACH_DEVELOPER_EMAILS;
+  process.env.ZATSUCOACH_DEVELOPER_EMAILS = value;
+  try {
+    return fn();
+  } finally {
+    if (previous === undefined) {
+      delete process.env.ZATSUCOACH_DEVELOPER_EMAILS;
+    } else {
+      process.env.ZATSUCOACH_DEVELOPER_EMAILS = previous;
+    }
+  }
+}
+
 test('public access ends at June 10 2026 JST for ordinary users', () => {
   withAccessEnd('2026-06-10T00:00:00+09:00', () => {
     const guest = principal();
@@ -82,24 +96,28 @@ test('public access ends at June 10 2026 JST for ordinary users', () => {
 
 test('developer Microsoft account remains exempt after public access ends', () => {
   withAccessEnd('2026-06-10T00:00:00+09:00', () => {
-    const developer = principal({ email: 'developer@example.com', identityProvider: 'aad' });
+    withDeveloperEmails('developer@example.com', () => {
+      const developer = principal({ email: 'developer@example.com', identityProvider: 'aad' });
 
-    assert.equal(canUseInteractiveFeatures(developer, afterEnd), true);
-    assert.deepEqual(publicAccessState(developer, afterEnd), {
-      ended: true,
-      exempt: true,
-      canUseInteractiveFeatures: true,
-      logAccess: 'read-write',
-      message: ''
+      assert.equal(canUseInteractiveFeatures(developer, afterEnd), true);
+      assert.deepEqual(publicAccessState(developer, afterEnd), {
+        ended: true,
+        exempt: true,
+        canUseInteractiveFeatures: true,
+        logAccess: 'read-write',
+        message: ''
+      });
     });
   });
 });
 
 test('developer email is not exempt after public access ends without Microsoft provider', () => {
   withAccessEnd('2026-06-10T00:00:00+09:00', () => {
-    const developerViaPassword = principal({ email: 'developer@example.com', identityProvider: 'password' });
+    withDeveloperEmails('developer@example.com', () => {
+      const developerViaPassword = principal({ email: 'developer@example.com', identityProvider: 'password' });
 
-    assert.equal(canUseInteractiveFeatures(developerViaPassword, afterEnd), false);
+      assert.equal(canUseInteractiveFeatures(developerViaPassword, afterEnd), false);
+    });
   });
 });
 

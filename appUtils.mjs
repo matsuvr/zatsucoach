@@ -1,6 +1,5 @@
 export const ADVISOR_TRANSCRIPT_GRACE_MS = 1200;
 export const DIAGNOSTIC_LOG_LIMIT = 1000;
-export const DEVELOPER_ACCOUNT_EMAILS = Object.freeze(['developer@example.com']);
 export const DEVELOPER_ONLY_TABS = Object.freeze(['metrics', 'events']);
 export const PUBLIC_PERIOD_ENDED_MESSAGE = '公開期間を終了しました';
 
@@ -53,11 +52,6 @@ export function canUseDeveloperTools(developerToolsEnabled) {
 
 export function isActiveRealtimeSession(sessionId, activeRealtimeSessionId) {
   return Number(sessionId) === Number(activeRealtimeSessionId);
-}
-
-export function isDeveloperAccount(principal) {
-  const allowed = new Set(DEVELOPER_ACCOUNT_EMAILS);
-  return principalIdentityValues(principal).some((value) => allowed.has(value));
 }
 
 // NOTE: Duplicated in api/_shared/appAuth.js (backend CommonJS). Keep implementations in sync.

@@ -13,7 +13,6 @@ import {
   formatApiError,
   formatLogDate,
   isActiveRealtimeSession,
-  isDeveloperAccount,
   labelToClass,
   latestTranscriptByRole,
   microphoneAudioConstraints,
@@ -291,20 +290,21 @@ function applyServerSettings(data, announce = true) {
 }
 
 async function loadAuthState() {
+  let authData = null;
   try {
     const response = await fetch('/api/auth/me', { cache: 'no-store' });
     if (!response.ok) throw new Error(`auth check failed: ${response.status}`);
-    const data = await safeJson(response);
-    const principal = data?.clientPrincipal || null;
+    authData = await safeJson(response);
+    const principal = authData?.clientPrincipal || null;
     const roles = Array.isArray(principal?.userRoles) ? principal.userRoles : [];
     state.authUser = principal && roles.includes('authenticated') ? principal : null;
-    state.publicAccess = normalizePublicAccess(data?.publicAccess, state.authUser);
+    state.publicAccess = normalizePublicAccess(authData?.publicAccess, state.authUser);
   } catch {
     state.authUser = null;
     state.publicAccess = normalizePublicAccess(null, null);
   } finally {
     state.authChecked = true;
-    state.developerToolsEnabled = isDeveloperAccount(state.authUser);
+    state.developerToolsEnabled = Boolean(authData?.developerToolsEnabled);
     renderAuthState();
     renderDeveloperControls();
     if (state.authUser) {

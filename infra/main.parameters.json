@@ -51,7 +51,7 @@
       "value": "${ZATSUCOACH_DEMO_PASSWORD_HASH=}"
     },
     "zatsucoachDeveloperEmails": {
-      "value": "${ZATSUCOACH_DEVELOPER_EMAILS=developer@example.com}"
+      "value": "${ZATSUCOACH_DEVELOPER_EMAILS=}"
     }
   }
 }

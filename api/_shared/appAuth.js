@@ -4,9 +4,7 @@ const crypto = require('crypto');
 
 const SESSION_COOKIE_NAME = 'zatsucoach_auth';
 const SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 7;
-const DEFAULT_DEVELOPER_EMAILS = [
-  'developer@example.com'
-];
+const DEFAULT_DEVELOPER_EMAILS = [];
 const DEFAULT_PUBLIC_ACCESS_ENDS_AT = '2026-06-10T00:00:00+09:00';
 const PUBLIC_PERIOD_ENDED_MESSAGE = '公開期間を終了しました';
 
@@ -375,6 +373,7 @@ module.exports = {
   publicAccessState,
   isPublicAccessEnded,
   canUseInteractiveFeatures,
+  isDeveloperPrincipal,
   PUBLIC_PERIOD_ENDED_MESSAGE,
   createSessionCookie,
   clearSessionCookie,
