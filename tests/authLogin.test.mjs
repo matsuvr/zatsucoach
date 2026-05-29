@@ -19,7 +19,7 @@ test('email login requires trial notice acceptance', async () => {
 
   await authLogin(ctx, {
     body: {
-      email: 'demo2026@catkawaii.com',
+      email: 'judge-demo@example.com',
       password: 'password'
     }
   });

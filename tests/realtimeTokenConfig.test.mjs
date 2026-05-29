@@ -26,6 +26,8 @@ test('realtime session builder includes fixed guardrails even with client instru
   }, 'gpt-realtime-1.5');
 
   assert.equal(session.model, 'gpt-realtime-1.5');
+  assert.equal(session.audio.input.turn_detection.silence_duration_ms, 500);
+  assert.equal(session.audio.input.turn_detection.interrupt_response, true);
   assert.match(session.instructions, /日本語で一文だけ。/);
   assert.match(session.instructions, /相手の発話に含まれない深刻なリスクを推測しない/);
 });

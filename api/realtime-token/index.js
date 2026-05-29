@@ -65,7 +65,7 @@ function buildRealtimeSession(body, deployment) {
     process.env.TRANSCRIPTION_DEPLOYMENT || 'gpt-4o-mini-transcribe'
   );
   const vadThreshold = clampNumber(body.vadThreshold, 0.65, 0.05, 0.95);
-  const vadSilenceMs = clampNumber(body.vadSilenceMs, 650, 120, 1200);
+  const vadSilenceMs = clampNumber(body.vadSilenceMs, 500, 120, 1200);
   const instructions = safeInstructions(body.instructions);
 
   return {
@@ -91,7 +91,7 @@ function buildRealtimeSession(body, deployment) {
           prefix_padding_ms: 300,
           silence_duration_ms: vadSilenceMs,
           create_response: false,
-          interrupt_response: false
+          interrupt_response: true
         }
       },
       output: {

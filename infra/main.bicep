@@ -57,7 +57,7 @@ param transcriptionDeployment string = 'gpt-4o-mini-transcribe'
 param zatsucoachAuthSecret string = ''
 
 @description('Demo account email address for email/password login.')
-param zatsucoachDemoEmail string = 'demo2026@catkawaii.com'
+param zatsucoachDemoEmail string = ''
 
 @secure()
 @description('PBKDF2 password hash for the demo email/password login account.')

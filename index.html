@@ -26,11 +26,11 @@
   <header class="topbar">
     <div>
       <div class="product">ZatsuCoach</div>
-      <div class="subtitle">VRM avatar + Azure OpenAI Realtime + parallel advice</div>
+      <div class="subtitle">AIと雑談しながら、あなたの発言をコーチがその場でアドバイス</div>
     </div>
     <div class="toolbar">
       <span id="accountStatus" class="accountStatus">account: checking</span>
-      <a id="btnLogin" class="button secondary" href="/login">ログイン</a>
+      <a id="btnLogin" class="button secondary" href="/login">登録・ログイン</a>
       <a id="btnLogout" class="button secondary" href="/logout">ログアウト</a>
       <button id="btnHealth" class="secondary">API確認</button>
       <button id="btnSettings" class="secondary">設定</button>
@@ -47,7 +47,7 @@
     <div class="loginPanel">
       <div>
         <h1>ZatsuCoach</h1>
-        <p>Microsoft アカウント、またはデモ用 Email/Password でログインしてください。</p>
+        <p>Microsoft アカウントで登録・ログインしてください。審査員の方は、案内された Email/Password でログインできます。</p>
       </div>
 
       <div class="trialNotice">
@@ -58,18 +58,19 @@
         </label>
       </div>
 
-      <a id="loginMicrosoft" class="button primary loginMicrosoft is-disabled" href="/.auth/login/aad?post_login_redirect_uri=/" aria-disabled="true">Microsoft でログイン</a>
+      <a id="loginMicrosoft" class="button primary loginMicrosoft is-disabled" href="/.auth/login/aad?post_login_redirect_uri=/" aria-disabled="true">Microsoft で登録・ログイン</a>
 
       <form id="emailLoginForm" class="emailLoginForm">
+        <p class="reviewerLoginNote">審査員用ログイン（案内された方のみ）</p>
         <label>
           Email
-          <input id="loginEmail" name="email" type="email" autocomplete="username" value="demo2026@catkawaii.com" required />
+          <input id="loginEmail" name="email" type="email" autocomplete="username" required />
         </label>
         <label>
           Password
           <input id="loginPassword" name="password" type="password" autocomplete="current-password" required />
         </label>
-        <button id="btnEmailLogin" class="primary" type="submit" disabled>Email でログイン</button>
+        <button id="btnEmailLogin" class="primary" type="submit" disabled>審査員用ログイン</button>
         <div id="loginError" class="loginError" role="alert"></div>
       </form>
     </div>
@@ -86,15 +87,6 @@
           <div id="stageChatOverlay" class="stageChatOverlay"></div>
           <div id="stageAdviceOverlay" class="stageAdviceOverlay">アドバイス</div>
         </div>
-      </div>
-      <div class="statusbar">
-        <span id="connectionStatus" class="statusChip">idle</span>
-        <span id="avatarStatus">avatar: loading</span>
-        <span id="latencyStatus">first reaction: -</span>
-      </div>
-      <div class="inputRow">
-        <input id="textInput" type="text" placeholder="テキストでも試せます。例: 最近オフィスに戻って疲れますね。" />
-        <button id="btnSendText">送信</button>
       </div>
     </section>
 

@@ -44,6 +44,7 @@ Common options:
   --advisor-deployment=grok-4-20-non-reasoning
   --chunk-seconds=4
   --max-chunks=4
+  --skip-advisor=true
   --headless=true`);
 }
 
@@ -100,7 +101,7 @@ async function createRealtimeClientSecret({ endpoint, apiKey, deployment, tokenU
         realtimeDeployment: deployment,
         voice,
         voiceSpeed: 1.25,
-        vadSilenceMs: 650,
+        vadSilenceMs: 500,
         vadThreshold: 0.55
       })
     });
@@ -231,6 +232,7 @@ async function main() {
   const headless = boolArg('headless', true);
   const humanLog = boolArg('human-log', true);
   const strictAdvisor = boolArg('strict-advisor', true);
+  const skipAdvisor = boolArg('skip-advisor', false);
   const advisorInstructions = argValue('advisor-instructions', `あなたは会話練習のリアルタイム助言AIです。Realtimeのユーザー発話文字起こし、アバター応答、会話履歴から、直前の会話状態を推定して助言します。
 
 出力形式:
@@ -274,7 +276,9 @@ async function main() {
   logHuman(`Advisor endpoint: ${advisorUrl}`);
   logHuman(`Advisor deployment: ${advisorDeployment}`);
   logHuman(`Audio: ${path.basename(audioPath)}, turns=${maxChunks}, chunk=${chunkSeconds}s`);
-  logHuman(`Advisor cadence: interval=${advisorIntervalMs}ms retry=${advisorRetryMs}ms maxRetries=${advisorMaxRetries} maxTokens=${advisorMaxTokens}`);
+  logHuman(skipAdvisor
+    ? 'Advisor: skipped'
+    : `Advisor cadence: interval=${advisorIntervalMs}ms retry=${advisorRetryMs}ms maxRetries=${advisorMaxRetries} maxTokens=${advisorMaxTokens}`);
 
   const transcript = [];
   const turns = Array.from({ length: maxChunks }, (_, index) => ({
@@ -282,7 +286,8 @@ async function main() {
     assistantTranscript: '',
     advisor: null,
     sawResponseDone: false,
-    responseStatus: ''
+    responseStatus: '',
+    timings: null
   }));
 
   const browser = await chromium.launch({
@@ -304,13 +309,15 @@ async function main() {
       logHuman(message);
     });
 
-    await page.exposeFunction('nodeTurnDone', async ({ index, userTranscript, assistantTranscript }) => {
+    await page.exposeFunction('nodeTurnDone', async ({ index, userTranscript, assistantTranscript, timings }) => {
       const turn = turns[index - 1];
       turn.userTranscript = userTranscript || '';
       turn.assistantTranscript = assistantTranscript || '';
       turn.sawResponseDone = true;
+      turn.timings = timings || null;
       logHuman(`Turn ${index}: user="${turn.userTranscript || '(empty transcript)'}"`);
       logHuman(`Turn ${index}: assistant="${turn.assistantTranscript || '(empty transcript)'}"`);
+      if (skipAdvisor) return null;
       if (!turn.assistantTranscript) return null;
 
       if (turn.userTranscript) transcript.push({ role: 'user', text: turn.userTranscript });
@@ -348,6 +355,17 @@ async function main() {
       const assistantPartsByTurn = Array.from({ length: maxChunks }, () => new Map());
       const responseDoneByTurn = Array.from({ length: maxChunks }, () => false);
       const responseStatusByTurn = Array.from({ length: maxChunks }, () => '');
+      const timingsByTurn = Array.from({ length: maxChunks }, () => ({
+        playStartedAt: 0,
+        playEndedAt: 0,
+        speechStartedAt: 0,
+        speechStoppedAt: 0,
+        responseCreateSentAt: 0,
+        responseCreatedAt: 0,
+        outputAudioStartedAt: 0,
+        firstTranscriptDeltaAt: 0,
+        responseDoneAt: 0
+      }));
       let configured = false;
       let finished = false;
       let activeTurn = -1;
@@ -445,7 +463,7 @@ async function main() {
                   prefix_padding_ms: 300,
                   silence_duration_ms: 500,
                   create_response: false,
-                  interrupt_response: false
+                  interrupt_response: true
                 }
               },
               output: {
@@ -481,8 +499,19 @@ async function main() {
 
           if (event.type === 'session.created') sendSessionUpdate();
           if (event.type === 'session.updated') configured = true;
+          if (event.type === 'input_audio_buffer.speech_started' && activeTurn >= 0) {
+            if (!timingsByTurn[activeTurn].speechStartedAt) timingsByTurn[activeTurn].speechStartedAt = performance.now();
+          }
           if (event.type === 'input_audio_buffer.speech_stopped' && activeTurn >= 0 && dc?.readyState === 'open') {
+            if (!timingsByTurn[activeTurn].speechStoppedAt) timingsByTurn[activeTurn].speechStoppedAt = performance.now();
             dc.send(JSON.stringify({ type: 'response.create' }));
+            if (!timingsByTurn[activeTurn].responseCreateSentAt) timingsByTurn[activeTurn].responseCreateSentAt = performance.now();
+          }
+          if (event.type === 'response.created' && activeTurn >= 0) {
+            if (!timingsByTurn[activeTurn].responseCreatedAt) timingsByTurn[activeTurn].responseCreatedAt = performance.now();
+          }
+          if (event.type === 'output_audio_buffer.started' && activeTurn >= 0) {
+            if (!timingsByTurn[activeTurn].outputAudioStartedAt) timingsByTurn[activeTurn].outputAudioStartedAt = performance.now();
           }
 
           if ((event.type === 'conversation.item.input_audio_transcription.delta' || event.type === 'conversation.item.audio_transcription.delta') && activeTurn >= 0) {
@@ -492,6 +521,9 @@ async function main() {
             userTextByTurn[activeTurn] = event.transcript || userTextByTurn[activeTurn] || '';
           }
           if (event.type === 'response.output_audio_transcript.delta' && activeTurn >= 0) {
+            if (!timingsByTurn[activeTurn].firstTranscriptDeltaAt) {
+              timingsByTurn[activeTurn].firstTranscriptDeltaAt = performance.now();
+            }
             const key = responseContentKey(event);
             assistantDeltaByContent.set(key, `${assistantDeltaByContent.get(key) || ''}${event.delta || ''}`);
           }
@@ -511,6 +543,7 @@ async function main() {
           if (event.type === 'response.done' && activeTurn >= 0) {
             responseDoneByTurn[activeTurn] = true;
             responseStatusByTurn[activeTurn] = event.response?.status || event.status || '';
+            timingsByTurn[activeTurn].responseDoneAt = performance.now();
             if (currentResponseDone) currentResponseDone();
           }
           if (event.type === 'error') {
@@ -543,11 +576,13 @@ async function main() {
         for (let index = 0; index < maxChunks; index += 1) {
           activeTurn = index;
           responseDoneByTurn[index] = false;
+          timingsByTurn[index].playStartedAt = performance.now();
           window.nodeLog(`Turn ${index + 1}: playing ${chunkSeconds}s audio into WebRTC track`);
           const responseDonePromise = new Promise((resolve) => {
             currentResponseDone = resolve;
           });
           await playAudioChunk(audioBuffer, destination, index);
+          timingsByTurn[index].playEndedAt = performance.now();
           await Promise.race([
             responseDonePromise,
             failAfter(turnTimeoutMs, `turn ${index + 1} response timed out`)
@@ -556,7 +591,8 @@ async function main() {
           await window.nodeTurnDone({
             index: index + 1,
             userTranscript: userTextByTurn[index] || '',
-            assistantTranscript: assistantTranscriptForTurn(index)
+            assistantTranscript: assistantTranscriptForTurn(index),
+            timings: derivedTimings(timingsByTurn[index])
           });
           if (error) break;
           await wait(250);
@@ -581,13 +617,32 @@ async function main() {
           index: index + 1,
           assistantTranscript,
           sawResponseDone: responseDoneByTurn[index],
-          responseStatus: responseStatusByTurn[index]
+          responseStatus: responseStatusByTurn[index],
+          timings: derivedTimings(timingsByTurn[index])
         })),
         seen: Array.from(new Set(seen))
       };
+
+      function elapsed(start, end) {
+        return start && end && end >= start ? Math.round(end - start) : 0;
+      }
+
+      function derivedTimings(timing) {
+        return {
+          speechStartAfterPlayMs: elapsed(timing.playStartedAt, timing.speechStartedAt),
+          speechStopAfterPlayMs: elapsed(timing.playStartedAt, timing.speechStoppedAt),
+          playDurationMs: elapsed(timing.playStartedAt, timing.playEndedAt),
+          responseCreateAfterSpeechStopMs: elapsed(timing.speechStoppedAt, timing.responseCreateSentAt),
+          responseCreatedAfterCreateMs: elapsed(timing.responseCreateSentAt, timing.responseCreatedAt),
+          firstAudioAfterCreateMs: elapsed(timing.responseCreateSentAt, timing.outputAudioStartedAt),
+          firstAudioAfterSpeechStopMs: elapsed(timing.speechStoppedAt, timing.outputAudioStartedAt),
+          firstTranscriptAfterCreateMs: elapsed(timing.responseCreateSentAt, timing.firstTranscriptDeltaAt),
+          responseDoneAfterCreateMs: elapsed(timing.responseCreateSentAt, timing.responseDoneAt)
+        };
+      }
     }, { token, webrtcUrl, audioDataUrl, voice, chunkSeconds, maxChunks, timeoutMs, turnTimeoutMs, transcriptionDeployment });
 
-    const advisorOk = turns.every((turn) => turn.advisor?.ok);
+    const advisorOk = skipAdvisor || turns.every((turn) => turn.advisor?.ok);
     const responsesOk = browserResult.turns.every((turn) => turn.assistantTranscript);
     const result = {
       ok: Boolean(browserResult.configured && browserResult.finished && responsesOk && advisorOk && !browserResult.error),
@@ -600,6 +655,7 @@ async function main() {
       responsesOk,
       advisorOk,
       strictAdvisor,
+      skipAdvisor,
       advisorIntervalMs,
       advisorRetryMs,
       advisorMaxRetries,
@@ -609,6 +665,7 @@ async function main() {
         index: turn.index,
         assistantTranscript: browserResult.turns[index]?.assistantTranscript || turn.assistantTranscript,
         advisor: turn.advisor,
+        timings: browserResult.turns[index]?.timings || turn.timings,
         sawResponseDone: browserResult.turns[index]?.sawResponseDone || turn.sawResponseDone,
         responseStatus: browserResult.turns[index]?.responseStatus || turn.responseStatus
       })),

@@ -8,6 +8,7 @@ const SERVER_EVENT_TYPES = new Set([
   'response.done',
   'error',
   'session.error',
+  'output_audio_buffer.cleared',
   'output_audio_buffer.started',
   'output_audio_buffer.stopped',
   'input_audio_buffer.speech_started',
@@ -17,7 +18,9 @@ const SERVER_EVENT_TYPES = new Set([
 ]);
 
 const CLIENT_EVENT_TYPES = new Set([
+  'client.assistant_response_cancelled_by_barge_in',
   'client.assistant_response_flushed',
+  'client.assistant_response_interrupted',
   'client.connection_state',
   'client.data_channel_open',
   'client.data_channel_close',
@@ -25,6 +28,7 @@ const CLIENT_EVENT_TYPES = new Set([
   'client.ice_state',
   'client.manual_response_create_deferred',
   'client.manual_response_create_sent',
+  'client.late_response_created_after_barge_in',
   'client.microphone_tracks_set',
   'client.noise_turn_ignored',
   'client.output_audio_stop_watchdog_released',

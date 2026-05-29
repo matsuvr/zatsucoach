@@ -39,7 +39,7 @@ const defaultSettings = Object.freeze({
   avatarTextDeployment: 'gpt-5.4-nano',
   voice: 'marin',
   voiceSpeed: 1.25,
-  vadSilenceMs: 650,
+  vadSilenceMs: 500,
   vadThreshold: 0.65,
   vadMinSpeechMs: 450,
   noiseReduction: 'far_field',
@@ -227,7 +227,7 @@ function loadSettings() {
     if (Number(settings.advisorMaxTokens) > 4096) {
       settings.advisorMaxTokens = defaultSettings.advisorMaxTokens;
     }
-    if (Number(settings.vadSilenceMs) < 500) {
+    if (Number(settings.vadSilenceMs) < 200) {
       settings.vadSilenceMs = defaultSettings.vadSilenceMs;
     }
     if (Number(settings.vadThreshold) === 0.55) settings.vadThreshold = defaultSettings.vadThreshold;
@@ -525,10 +525,12 @@ function wireEvents() {
   renderLoginConsentState();
   els.btnConnect.addEventListener('click', startRealtime);
   els.btnDisconnect.addEventListener('click', stopRealtime);
-  els.btnSendText.addEventListener('click', sendText);
-  els.textInput.addEventListener('keydown', (event) => {
-    if (event.key === 'Enter') sendText();
-  });
+  if (els.btnSendText) els.btnSendText.addEventListener('click', sendText);
+  if (els.textInput) {
+    els.textInput.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') sendText();
+    });
+  }
   els.btnHealth.addEventListener('click', checkHealth);
   els.btnBenchAdvisor.addEventListener('click', benchmarkAdvisorModels);
   els.btnRefreshLogs.addEventListener('click', loadSavedSessions);
@@ -837,7 +839,7 @@ function handleRealtimeEffect(effect) {
       break;
     case 'recordFirstAudioLatency':
       state.latencySamples.push(effect.ms);
-      els.latencyStatus.textContent = `first reaction: ${effect.ms}ms`;
+      if (els.latencyStatus) els.latencyStatus.textContent = `first reaction: ${effect.ms}ms`;
       addMetric(`Realtime first audio: ${effect.ms}ms / ${effect.deployment || state.settings.realtimeDeployment}`);
       break;
     case 'scheduleAdvisorFromRealtimeResponse':
@@ -942,6 +944,7 @@ async function stopRealtime(showMessage = true, sessionId = state.activeRealtime
 }
 
 async function sendText() {
+  if (!els.textInput) return;
   if (!state.authUser) {
     renderAuthState();
     if (els.loginError) els.loginError.textContent = 'ログインしてから送信してください。';
@@ -1249,5 +1252,6 @@ function exportDiagnosticEvents() {
 }
 
 function setConnectionStatus(text) {
+  if (!els.connectionStatus) return;
   els.connectionStatus.textContent = text;
 }

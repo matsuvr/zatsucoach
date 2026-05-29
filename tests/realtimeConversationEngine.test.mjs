@@ -11,7 +11,7 @@ function createHarness(settings = {}) {
   const engine = createRealtimeConversationEngine({
     getSettings: () => ({
       realtimeDeployment: 'gpt-realtime-2',
-      vadSilenceMs: 650,
+      vadSilenceMs: 500,
       vadMinSpeechMs: 450,
       ...settings
     }),
@@ -111,7 +111,7 @@ test('useful transcript publishes once and sends the minimal response.create pay
   assert.deepEqual(h.sentEvents('response.create'), [{ type: 'response.create' }]);
 });
 
-test('accepted turn is deferred while a response is active and sent after response.done', () => {
+test('accepted turn interrupts an active response and sends the next response immediately', () => {
   const h = createHarness();
   h.begin();
   h.effects.length = 0;
@@ -120,12 +120,10 @@ test('accepted turn is deferred while a response is active and sent after respon
   h.engine.handleServerEvent({ type: 'response.created', response: { id: 'r1' } });
   acceptTranscriptTurn(h, 'u2', '次の話です');
 
-  assert.equal(h.sentEvents('response.create').length, 1);
-  assert.equal(h.byType('logEvent').some((effect) => effect.event.type === 'client.manual_response_create_deferred'), true);
-
-  h.engine.handleServerEvent({ type: 'response.done', response: { id: 'r1', status: 'completed' } });
-
+  assert.equal(h.sentEvents('response.cancel').length, 1);
   assert.equal(h.sentEvents('response.create').length, 2);
+  assert.equal(h.byType('logEvent').some((effect) => effect.event.type === 'client.assistant_response_interrupted'), true);
+  assert.equal(h.byType('logEvent').some((effect) => effect.event.type === 'client.manual_response_create_deferred'), false);
 });
 
 test('assistant transcript flushes once and schedules one advisor request', () => {
@@ -169,7 +167,7 @@ test('avatar audio does not disable microphone capture', () => {
   assert.equal(h.byType('setAvatarSpeaking').at(-1).speaking, true);
 });
 
-test('overlapped user speech is transcribed while avatar response continues', () => {
+test('overlapped user speech interrupts avatar response and responds without deferred wait', () => {
   const h = createHarness();
   h.begin();
   h.effects.length = 0;
@@ -188,14 +186,40 @@ test('overlapped user speech is transcribed while avatar response continues', ()
   });
 
   assert.equal(h.byType('addTranscript').filter((effect) => effect.role === 'user').length, 1);
-  assert.equal(h.byType('addTranscript').find((effect) => effect.role === 'user').options.avatarOverlapMs, 300);
-  assert.equal(h.byType('logEvent').some((effect) => effect.event.type === 'client.manual_response_create_deferred'), true);
-  assert.equal(h.sentEvents('response.create').length, 0);
+  const userTranscript = h.byType('addTranscript').find((effect) => effect.role === 'user');
+  assert.equal(userTranscript.options.avatarOverlapMs, 0);
+  assert.equal(userTranscript.options.overlappedAvatar, true);
+  assert.equal(h.byType('logEvent').some((effect) => effect.event.type === 'client.assistant_response_interrupted'), true);
+  assert.equal(h.byType('logEvent').some((effect) => effect.event.type === 'client.manual_response_create_deferred'), false);
+  assert.equal(h.sentEvents('response.cancel').length, 1);
+  assert.equal(h.sentEvents('response.create').length, 1);
 
   h.engine.handleServerEvent({ type: 'response.done', response: { id: 'r1', status: 'completed' } });
   h.engine.handleServerEvent({ type: 'output_audio_buffer.stopped', response_id: 'r1' });
 
   assert.equal(h.sentEvents('response.create').length, 1);
+});
+
+test('barge-in cancelled responses do not warn or schedule advice', () => {
+  const h = createHarness();
+  h.begin();
+  h.effects.length = 0;
+
+  h.engine.handleServerEvent({ type: 'response.created', response: { id: 'r1' } });
+  h.engine.handleServerEvent({ type: 'output_audio_buffer.started', response_id: 'r1' });
+  h.engine.handleServerEvent({ type: 'input_audio_buffer.speech_started', item_id: 'u1', audio_start_ms: 0 });
+  h.engine.handleServerEvent({
+    type: 'response.done',
+    response: {
+      id: 'r1',
+      status: 'cancelled',
+      status_details: { reason: 'turn_detected' }
+    }
+  });
+
+  assert.equal(h.byType('addAdvice').some((effect) => effect.label === 'warn'), false);
+  assert.equal(h.byType('scheduleAdvisorFromRealtimeResponse').length, 0);
+  assert.equal(h.byType('logEvent').some((effect) => effect.event.type === 'client.assistant_response_cancelled_by_barge_in'), true);
 });
 
 test('incomplete response warns and does not schedule advisor', () => {

@@ -4,7 +4,6 @@ const crypto = require('crypto');
 
 const SESSION_COOKIE_NAME = 'zatsucoach_auth';
 const SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 7;
-const DEFAULT_DEMO_EMAIL = 'demo2026@catkawaii.com';
 const DEFAULT_DEVELOPER_EMAILS = [
   'developer@example.com'
 ];
@@ -124,7 +123,7 @@ function passwordPrincipal(email, sub = email) {
 }
 
 function demoEmail() {
-  return normalizeEmail(process.env.ZATSUCOACH_DEMO_EMAIL || DEFAULT_DEMO_EMAIL);
+  return normalizeEmail(process.env.ZATSUCOACH_DEMO_EMAIL || '');
 }
 
 function verifyDemoCredentials(email, password) {

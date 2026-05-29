@@ -10,6 +10,7 @@ import {
   assistantIncompleteDiagnostic,
   formatAssistantIncompleteMessage,
   formatAssistantIncompleteUserMessage,
+  USER_TURN_DURATION_DECISION_DELAY_MS,
   USER_TURN_TRANSCRIPT_WAIT_MS,
   assistantIncompleteReason,
   assistantResponseTimeline,
@@ -161,6 +162,9 @@ export function createRealtimeConversationEngine({
         break;
       case 'output_audio_buffer.stopped':
         markOutputAudioStopped(event);
+        break;
+      case 'output_audio_buffer.cleared':
+        markOutputAudioCleared(event);
         break;
       case 'response.output_audio_transcript.delta':
       case 'response.audio_transcript.delta':
@@ -367,6 +371,18 @@ export function createRealtimeConversationEngine({
     if (event.response_id) scheduleAssistantResponseFlush(event.response_id, 300, 'output_audio_buffer_stopped');
   }
 
+  function markOutputAudioCleared(event) {
+    const key = audioOutputKey(event);
+    if (event.response_id || event.item_id) {
+      state.activeAssistantAudioResponseIds.delete(key);
+      clearOutputAudioStopWatchdog(key);
+    } else {
+      state.activeAssistantAudioResponseIds.clear();
+      clearAllOutputAudioStopWatchdogs();
+    }
+    finishAvatarAudioOutput('output_audio_buffer_cleared');
+  }
+
   function recordAssistantTextDelta(event) {
     if (event.type.includes('audio_transcript')) markAssistantAudioExpected(event);
     const key = responseContentKey(event);
@@ -442,10 +458,12 @@ export function createRealtimeConversationEngine({
   }
 
   function startUserTurn(event) {
+    const avatarSpeakingAtStart = Boolean(state.avatarSpeaking);
     state.localUserSpeaking = true;
     effect('setLocalUserSpeaking', { speaking: true });
     effect('setAvatarMood', { mood: 'listening' });
     effect('setConnectionStatus', { text: 'listening' });
+    interruptActiveAssistantResponse('user_speech_started');
 
     const itemId = event.item_id || `pending-${event.event_id || Date.now().toString(36)}`;
     const previous = state.userTurnByItem.get(itemId) || {};
@@ -465,7 +483,7 @@ export function createRealtimeConversationEngine({
       accepted: false,
       ignored: false,
       responseSent: false,
-      avatarSpeakingAtStart: Boolean(state.avatarSpeaking),
+      avatarSpeakingAtStart,
       avatarOverlapMs: Number(previous.avatarOverlapMs) || 0,
       decisionTimer: null
     });
@@ -484,7 +502,11 @@ export function createRealtimeConversationEngine({
     turn.avatarSpeakingAtStop = Boolean(state.avatarSpeaking);
     turn.avatarOverlapMs = overlapMs(turn.perfStartedAt, turn.perfStoppedAt, currentAvatarAudioIntervals());
     state.userTurnByItem.set(itemId, turn);
-    scheduleUserTurnDecision(itemId, USER_TURN_TRANSCRIPT_WAIT_MS, 'speech_stopped');
+    const decision = userTurnDecision(turn, getSettings());
+    const delayMs = decision.accept && decision.reason === 'duration'
+      ? USER_TURN_DURATION_DECISION_DELAY_MS
+      : USER_TURN_TRANSCRIPT_WAIT_MS;
+    scheduleUserTurnDecision(itemId, delayMs, 'speech_stopped');
   }
 
   function markUserTurnCommitted(event) {
@@ -560,7 +582,7 @@ export function createRealtimeConversationEngine({
         finalTranscriptChars: String(turn.finalTranscriptText || '').trim().length,
         transcriptFinal: Boolean(turn.transcriptFinal),
         avatarOverlapMs: Number(turn.avatarOverlapMs) || 0,
-        overlappedAvatar: Number(turn.avatarOverlapMs) > 0
+        overlappedAvatar: Boolean(turn.avatarSpeakingAtStart) || Number(turn.avatarOverlapMs) > 0
       }
     });
     publishFinalUserTranscriptForTurn(turn, 'accepted_with_final_transcript');
@@ -618,7 +640,7 @@ export function createRealtimeConversationEngine({
       speechDurationMs: Math.max(0, Math.round((Number(turn.perfStoppedAt) || 0) - (Number(turn.perfStartedAt) || 0))),
       approxSpeechMs: Number(turn.approxSpeechMs) || 0,
       avatarOverlapMs: Number(turn.avatarOverlapMs) || 0,
-      overlappedAvatar: Number(turn.avatarOverlapMs) > 0,
+      overlappedAvatar: Boolean(turn.avatarSpeakingAtStart) || Number(turn.avatarOverlapMs) > 0,
       responseDeferred: Boolean(turn.responseDeferred)
     });
     if (state.pendingAssistantResponseUserItems.length > 20) state.pendingAssistantResponseUserItems.shift();
@@ -653,6 +675,47 @@ export function createRealtimeConversationEngine({
         reason
       }
     });
+  }
+
+  function interruptActiveAssistantResponse(reason) {
+    const responseIds = Array.from(state.activeRealtimeResponseIds);
+    const pendingCreate = Boolean(state.pendingRealtimeResponseCreate);
+    const hasAssistantOutput = state.activeAssistantAudioResponseIds.size > 0 || state.avatarSpeaking;
+    if (!responseIds.length && !pendingCreate && !hasAssistantOutput) return false;
+
+    if (responseIds.length || pendingCreate) {
+      effect('sendClientEvent', { event: { type: 'response.cancel' } });
+    }
+    for (const responseId of responseIds) {
+      state.bargeInCancelledResponseIds.add(responseId);
+      updateAssistantResponseMeta(responseId, { cancelledByBargeIn: true });
+      clearTimer(state.realtimeResponseWatchdogTimers.get(responseId));
+      state.realtimeResponseWatchdogTimers.delete(responseId);
+      clearTimer(state.assistantResponseTimers.get(responseId));
+      state.assistantResponseTimers.delete(responseId);
+    }
+
+    clearPendingResponseCreate();
+    if (pendingCreate && !responseIds.length) {
+      state.cancelNextCreatedResponseForBargeIn = true;
+    }
+    state.activeRealtimeResponseIds.clear();
+    state.activeAssistantAudioResponseIds.clear();
+    clearAllOutputAudioStopWatchdogs();
+    closeActiveAvatarAudioInterval(now());
+    state.avatarSpeaking = false;
+    effect('setAvatarSpeaking', { speaking: false });
+    effect('logEvent', {
+      event: {
+        type: 'client.assistant_response_interrupted',
+        sessionId: state.sessionId,
+        reason,
+        responseIds,
+        pendingCreate,
+        hadAssistantOutput: hasAssistantOutput
+      }
+    });
+    return true;
   }
 
   function sendDeferredManualResponseCreate(reason) {
@@ -848,7 +911,7 @@ export function createRealtimeConversationEngine({
       endPerfAt: Number(turn.perfStoppedAt) || 0,
       durationMs: Math.max(0, Math.round((Number(turn.perfStoppedAt) || 0) - (Number(turn.perfStartedAt) || 0))),
       avatarOverlapMs: Number(turn.avatarOverlapMs) || 0,
-      overlappedAvatar: Number(turn.avatarOverlapMs) > 0,
+      overlappedAvatar: Boolean(turn.avatarSpeakingAtStart) || Number(turn.avatarOverlapMs) > 0,
       audioStartMs: Number(turn.audioStartMs),
       audioEndMs: Number(turn.audioEndMs)
     });
@@ -894,6 +957,7 @@ export function createRealtimeConversationEngine({
   function handleResponseCreated(event) {
     const responseId = event.response?.id || event.response_id;
     if (!responseId) return;
+    const cancelForBargeIn = Boolean(state.cancelNextCreatedResponseForBargeIn);
     clearPendingResponseCreate();
     state.activeRealtimeResponseIds.add(responseId);
     scheduleRealtimeResponseWatchdog(responseId);
@@ -908,8 +972,21 @@ export function createRealtimeConversationEngine({
       userAvatarOverlapMs: Number(pending.avatarOverlapMs) || 0,
       userOverlappedAvatar: Boolean(pending.overlappedAvatar),
       responseDeferred: Boolean(pending.responseDeferred),
-      responseCreatedAt: now()
+      responseCreatedAt: now(),
+      cancelledByBargeIn: cancelForBargeIn
     });
+    if (cancelForBargeIn) {
+      state.bargeInCancelledResponseIds.add(responseId);
+      effect('sendClientEvent', { event: { type: 'response.cancel' } });
+      markRealtimeResponseDone(responseId);
+      effect('logEvent', {
+        event: {
+          type: 'client.late_response_created_after_barge_in',
+          sessionId: state.sessionId,
+          responseId
+        }
+      });
+    }
   }
 
   function markRealtimeResponseDone(responseId) {
@@ -968,11 +1045,13 @@ export function createRealtimeConversationEngine({
 
   function responseMetaFromDoneEvent(event) {
     const response = event.response || {};
+    const responseId = response.id || event.response_id;
     return {
       status: response.status || event.status || '',
       statusDetails: response.status_details || event.status_details || null,
       usage: response.usage || event.usage || null,
-      responseDoneAt: now()
+      responseDoneAt: now(),
+      cancelledByBargeIn: responseId ? state.bargeInCancelledResponseIds.has(responseId) : false
     };
   }
 
@@ -988,6 +1067,25 @@ export function createRealtimeConversationEngine({
     if (!responseId || state.processedAssistantResponses.has(responseId)) return;
     const parts = state.assistantResponseParts.get(responseId);
     const meta = state.assistantResponseMeta.get(responseId) || {};
+    if (meta.cancelledByBargeIn || state.bargeInCancelledResponseIds.has(responseId)) {
+      clearTimer(state.assistantResponseTimers.get(responseId));
+      state.assistantResponseTimers.delete(responseId);
+      state.assistantResponseParts.delete(responseId);
+      state.assistantResponseMeta.delete(responseId);
+      state.bargeInCancelledResponseIds.delete(responseId);
+      state.processedAssistantResponses.add(responseId);
+      trimSet(state.processedAssistantResponses, 80, 40);
+      effect('logEvent', {
+        event: {
+          type: 'client.assistant_response_cancelled_by_barge_in',
+          sessionId: state.sessionId,
+          responseId,
+          reason,
+          parts: parts?.size || 0
+        }
+      });
+      return;
+    }
     if (!parts?.size) {
       const incompleteReason = assistantIncompleteReason(meta);
       if (incompleteReason) {
@@ -1132,6 +1230,7 @@ export function createRealtimeConversationEngine({
 
   function clearPendingResponseCreate() {
     state.pendingRealtimeResponseCreate = false;
+    state.cancelNextCreatedResponseForBargeIn = false;
     clearStoredTimer('pendingRealtimeResponseCreateTimer');
   }
 
@@ -1157,12 +1256,14 @@ export function createRealtimeConversationEngine({
     state.assistantResponseMeta.clear();
     state.pendingAssistantResponseUserItems = [];
     state.pendingRealtimeResponseCreate = false;
+    state.cancelNextCreatedResponseForBargeIn = false;
     clearStoredTimer('pendingRealtimeResponseCreateTimer');
     clearTimerMap(state.realtimeResponseWatchdogTimers);
     state.activeRealtimeResponseIds.clear();
     state.deferredUserResponseTurnId = '';
     state.activeAssistantAudioResponseIds.clear();
     clearAllOutputAudioStopWatchdogs();
+    state.bargeInCancelledResponseIds.clear();
     state.activeAvatarAudioStartedAt = 0;
     state.avatarAudioIntervals = [];
     state.realtimeConversationItems.clear();

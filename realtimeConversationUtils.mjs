@@ -1,10 +1,11 @@
 export const DEFAULTS = Object.freeze({
-  vadSilenceMs: 650,
+  vadSilenceMs: 500,
   vadMinSpeechMs: 450
 });
 
 export const VAD_PREFIX_PADDING_MS = 300;
 export const USER_TURN_TRANSCRIPT_WAIT_MS = 800;
+export const USER_TURN_DURATION_DECISION_DELAY_MS = 0;
 export const ASSISTANT_RESPONSE_FALLBACK_FLUSH_MS = 2500;
 export const REALTIME_CONTEXT_PRUNE_AFTER_ITEMS = 34;
 export const REALTIME_CONTEXT_KEEP_ITEMS = 28;
@@ -32,11 +33,13 @@ export function createInitialState() {
     pendingAssistantResponseUserItems: [],
     pendingRealtimeResponseCreate: false,
     pendingRealtimeResponseCreateTimer: null,
+    cancelNextCreatedResponseForBargeIn: false,
     activeRealtimeResponseIds: new Set(),
     realtimeResponseWatchdogTimers: new Map(),
     deferredUserResponseTurnId: '',
     activeAssistantAudioResponseIds: new Set(),
     outputAudioStopWatchdogTimers: new Map(),
+    bargeInCancelledResponseIds: new Set(),
     activeAvatarAudioStartedAt: 0,
     avatarAudioIntervals: [],
     realtimeConversationItems: new Map(),

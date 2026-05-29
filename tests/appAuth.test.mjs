@@ -50,6 +50,20 @@ function withAccessEnd(value, fn) {
   }
 }
 
+function withDemoEmail(value, fn) {
+  const previous = process.env.ZATSUCOACH_DEMO_EMAIL;
+  process.env.ZATSUCOACH_DEMO_EMAIL = value;
+  try {
+    return fn();
+  } finally {
+    if (previous === undefined) {
+      delete process.env.ZATSUCOACH_DEMO_EMAIL;
+    } else {
+      process.env.ZATSUCOACH_DEMO_EMAIL = previous;
+    }
+  }
+}
+
 test('public access ends at June 10 2026 JST for ordinary users', () => {
   withAccessEnd('2026-06-10T00:00:00+09:00', () => {
     const guest = principal();
@@ -90,19 +104,19 @@ test('developer email is not exempt after public access ends without Microsoft p
 });
 
 test('demo Email/Password account remains exempt after public access ends', () => {
-  withAccessEnd('2026-06-10T00:00:00+09:00', () => {
-    const demo = principal({ email: 'demo2026@catkawaii.com', identityProvider: 'password' });
+  withDemoEmail('judge-demo@example.com', () => withAccessEnd('2026-06-10T00:00:00+09:00', () => {
+    const demo = principal({ email: 'judge-demo@example.com', identityProvider: 'password' });
 
     assert.equal(canUseInteractiveFeatures(demo, afterEnd), true);
-  });
+  }));
 });
 
 test('demo email is not exempt when it comes from Microsoft login', () => {
-  withAccessEnd('2026-06-10T00:00:00+09:00', () => {
-    const demoViaMicrosoft = principal({ email: 'demo2026@catkawaii.com', identityProvider: 'aad' });
+  withDemoEmail('judge-demo@example.com', () => withAccessEnd('2026-06-10T00:00:00+09:00', () => {
+    const demoViaMicrosoft = principal({ email: 'judge-demo@example.com', identityProvider: 'aad' });
 
     assert.equal(canUseInteractiveFeatures(demoViaMicrosoft, afterEnd), false);
-  });
+  }));
 });
 
 test('interactive and log write guards reject ordinary users after public access ends', () => {
